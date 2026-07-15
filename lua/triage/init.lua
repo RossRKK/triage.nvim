@@ -57,10 +57,11 @@ local uv = vim.uv or vim.loop
 --- stdout lines and the exit code; stdout is returned even on a non-zero exit so
 --- callers like merged_tree can read a conflicted merge's tree oid.
 ---@param cmd string[]
+---@param stdin string? fed to the process (used to batch hash-object paths)
 ---@return string[] lines, integer code
-local function sh(cmd)
+local function sh(cmd, stdin)
   local co = assert(coroutine.running(), "review: git must run inside a coroutine")
-  vim.system(cmd, { text = true }, function(obj)
+  vim.system(cmd, { text = true, stdin = stdin }, function(obj)
     vim.schedule(function()
       local lines = {}
       for line in (obj.stdout or ""):gmatch("[^\r\n]+") do
@@ -169,12 +170,18 @@ local function state_dir()
   return dir
 end
 
+-- Sanitise the repo path into a single filename component. Dots are escaped
+-- along with the separators and a ".triage" suffix is added so this file can
+-- never collide with a sibling plugin's state for a *different* repo (nitpick's
+-- "<key>.drafts" in the same directory: without dot-escaping, the suffix-less
+-- file for a repo literally named "/a/b.drafts" would be nitpick's drafts file
+-- for "/a/b"). nitpick escapes identically — kept in sync by convention, not a
+-- shared module, so the plugins stay separable.
 ---@param root string
 ---@return string
 local function decisions_file(root)
-  -- Sanitise the repo path into a single filename component.
-  local key = root:gsub("[/\\:]", "%%")
-  return state_dir() .. "/" .. key
+  local key = root:gsub("[/\\:.]", "%%")
+  return state_dir() .. "/" .. key .. ".triage"
 end
 
 --- Load decisions: relative path -> Decision.
@@ -184,7 +191,14 @@ local function load_decisions(root)
   local decisions = {}
   local path = decisions_file(root)
   if vim.fn.filereadable(path) == 0 then
-    return decisions
+    -- Fall back to the pre-suffix filename so existing decisions survive the
+    -- rename; the next save writes the new path.
+    local legacy = state_dir() .. "/" .. root:gsub("[/\\:]", "%%")
+    if legacy ~= path and vim.fn.filereadable(legacy) == 1 then
+      path = legacy
+    else
+      return decisions
+    end
   end
   for _, line in ipairs(vim.fn.readfile(path)) do
     -- Blob hashes are hex, so a leading "approved"/"rejected" word is
@@ -227,6 +241,36 @@ local function blob_hash(root, rel)
     return nil
   end
   return hash
+end
+
+--- Blob hashes for many working-tree files in ONE git process (rel -> hash),
+--- instead of a spawn per file — refresh needs a hash for every decided file,
+--- which is O(review size) on every save otherwise. `--stdin-paths` prints one
+--- hash per input line in order, so the result aligns by index; but it aborts
+--- on the first unreadable path, misaligning the rest, so a non-zero exit falls
+--- back to per-file hashing (which simply skips the unreadable ones).
+---@param root string
+---@param rels string[]
+---@return table<string, string>
+local function blob_hashes(root, rels)
+  local out = {}
+  if #rels == 0 then
+    return out
+  end
+  local lines, code = sh(
+    { "git", "-C", root, "hash-object", "--stdin-paths" },
+    table.concat(rels, "\n") .. "\n"
+  )
+  if code == 0 and #lines == #rels then
+    for i, rel in ipairs(rels) do
+      out[rel] = lines[i]
+    end
+    return out
+  end
+  for _, rel in ipairs(rels) do
+    out[rel] = blob_hash(root, rel)
+  end
+  return out
 end
 
 --- Resolve a ref to its commit sha (cheap; used for cache keys).
@@ -350,13 +394,25 @@ local function do_refresh(mygen)
   local status_by_path = {}
   local still = {} -- prune decisions for files no longer in the diff
 
+  -- Hash every decided file in one git call rather than one process per file.
+  local decided = {}
+  for rel in pairs(changed) do
+    if decisions[rel] then
+      decided[#decided + 1] = rel
+    end
+  end
+  local hashes = blob_hashes(root, decided)
+  if stale() then
+    return
+  end
+
   for rel in pairs(changed) do
     local abs = vim.fs.normalize(root .. "/" .. rel)
     local decision = decisions[rel]
     if not decision then
       status_by_path[abs] = "changed"
     else
-      local matches = decision.hash == blob_hash(root, rel)
+      local matches = decision.hash == hashes[rel]
       if decision.status == "rejected" then
         -- Keep the rejection on record either way: an edited-since rejected file
         -- becomes "revised" (the flag was acted on — re-review the fix), not a
@@ -551,6 +607,12 @@ function M.mark(status, abs)
   abs = vim.fs.normalize(abs)
   local is_dir = vim.fn.isdirectory(abs) == 1
 
+  -- Invalidate any in-flight refresh NOW: its decision pruning loaded the ledger
+  -- before this mark writes, so letting it finish would save that stale set over
+  -- the decision recorded below. Bumping the generation makes it discard itself
+  -- at its next stale() check; the M.refresh() at the end re-runs it fresh.
+  refresh_gen = refresh_gen + 1
+
   coroutine.wrap(function()
     local ok, err = pcall(function()
       local root = repo_root()
@@ -579,12 +641,15 @@ function M.mark(status, abs)
       end
 
       local decisions = load_decisions(root)
+      local rels = {}
       for _, path in ipairs(targets) do
-        local rel = path:sub(#nroot + 2)
+        rels[#rels + 1] = path:sub(#nroot + 2)
+      end
+      local hashes = status and blob_hashes(root, rels) or {}
+      for _, rel in ipairs(rels) do
         if status then
-          local hash = blob_hash(root, rel)
-          if hash then
-            decisions[rel] = { status = status, hash = hash }
+          if hashes[rel] then
+            decisions[rel] = { status = status, hash = hashes[rel] }
           end
         else
           decisions[rel] = nil
@@ -625,8 +690,12 @@ local function diff_base()
   if M.target_override then
     return M.target_override
   end
+  -- Sync call (this runs outside the coroutine paths): anchor it on the current
+  -- buffer's repo rather than nvim's cwd, which may be elsewhere.
   local default = vim.fn.systemlist({
     "git",
+    "-C",
+    vim.fs.root(0, ".git") or vim.fn.getcwd(),
     "symbolic-ref",
     "--quiet",
     "--short",
@@ -752,6 +821,8 @@ function M.setup(opts)
   local function complete_ref(arg)
     local refs = vim.fn.systemlist({
       "git",
+      "-C",
+      vim.fs.root(0, ".git") or vim.fn.getcwd(),
       "for-each-ref",
       "--format=%(refname:short)",
       "refs/heads",
@@ -821,8 +892,12 @@ function M.setup(opts)
   vim.api.nvim_create_autocmd({ "BufWritePost", "FocusGained", "DirChanged" }, {
     callback = function()
       -- Debounce a touch so a burst of events collapses into one git pass.
-      if M._pending then
+      -- stop() alone leaves the libuv handle alive, so close it too — a long
+      -- session would otherwise accumulate one dead timer per save. defer_fn
+      -- timers close themselves once fired, hence the is_closing guard.
+      if M._pending and not M._pending:is_closing() then
         M._pending:stop()
+        M._pending:close()
       end
       M._pending = vim.defer_fn(M.refresh, 150)
     end,
