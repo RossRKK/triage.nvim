@@ -15,15 +15,15 @@
 
 local M = {}
 
--- Status -> glyph + highlight. The trailing space separates the glyph from the
--- filename that follows it in the renderer. Highlights are defined in
--- triage/init.lua's set_hl (themeable, glyph-only colouring).
-local icon_by_status = {
-  changed = { text = "● ", highlight = "ReviewChanged" },
-  approved = { text = "✓ ", highlight = "ReviewApproved" },
-  rejected = { text = "✗ ", highlight = "ReviewRejected" },
-  revised = { text = "↻ ", highlight = "ReviewRevised" },
-}
+-- The glyphs come from triage.icons, so the tree and every other surface mark a
+-- status the same way; only the neo-tree chunk shape (and the trailing space
+-- that separates the glyph from the filename) is this adapter's business.
+---@param status string
+---@return table chunk
+local function icon(status)
+  local spec = require("triage").icons[status]
+  return spec and { text = spec.text .. " ", highlight = spec.hl } or nil
+end
 
 --- A neo-tree renderer component: the triage glyph for a path. Directories show
 --- their rolled-up descendant status. Placed before "name" in the file/directory
@@ -33,9 +33,8 @@ local icon_by_status = {
 function M.status_component(_, node, _)
   local review = require("triage")
   local status = node.type == "directory" and review.folder(node.path) or review.status(node.path)
-  local icon = status and icon_by_status[status]
   -- neo-tree renders a single chunk; empty text is a no-op.
-  return icon or { text = "" }
+  return (status and icon(status)) or { text = "" }
 end
 
 --- Absolute path of the node under the cursor, but only while the filesystem

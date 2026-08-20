@@ -28,7 +28,7 @@ Pairs with [nitpick.nvim][] (inline GitHub PR comments), but stands alone.
 
 | Key         | Type                    | Description                                              |
 | ----------- | ----------------------- | ------------------------------------------------------- |
-| `on_toggle` | `fun(on: boolean)`      | Called when review mode is toggled. Wire a companion (e.g. nitpick) here. |
+| `on_toggle` | `fun(on: boolean, root: string)` | Called when review mode is toggled, with the repo root it applies to. Wire a companion (e.g. nitpick) here. |
 
 The neo-tree glyph is registered as the `triage_status` component
 (`require("triage.adapter").status_component`); add it to your neo-tree
@@ -48,8 +48,8 @@ triage's `on_toggle` reveals nitpick, and nitpick's `verdict` borrows triage's:
     config = function()
       require("triage").setup({
         -- Toggling review mode reveals/hides nitpick's comments too.
-        on_toggle = function(on)
-          require("nitpick").set_shown(on)
+        on_toggle = function(on, root)
+          require("nitpick").set_shown(on, root)
         end,
       })
     end,

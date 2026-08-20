@@ -1,0 +1,9 @@
+# Matches Neovim core's own stylua config. Without this file stylua defaults to
+# tabs at 120 columns, and any editor formatting a file on save silently
+# reformats the whole thing away from the 2-space style used here.
+# (Core also sets call_parentheses = "None"; this config always writes them.)
+column_width = 100
+indent_type = "Spaces"
+indent_width = 2
+quote_style = "AutoPreferDouble"
+call_parentheses = "Always"

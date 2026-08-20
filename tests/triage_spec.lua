@@ -6,8 +6,11 @@ local triage = require("triage")
 describe("triage.verdict", function()
   ---@param state table<string, string> abs-path -> status
   local function verdict_of(state)
-    triage.status_by_path = state
-    return triage.verdict()
+    triage.status_by_path = {}
+    for path, st in pairs(state) do
+      triage.status_by_path["/repo/" .. path] = st
+    end
+    return triage.verdict("/repo")
   end
 
   after_each(function()
@@ -46,6 +49,13 @@ describe("triage.verdict", function()
 
   it("ranks revised above a rejection", function()
     assert.equals("COMMENT", verdict_of({ a = "revised", b = "rejected" }))
+  end)
+
+  -- Reviews are per repo: another repo's pending files must not soften this
+  -- repo's verdict (state is one merged table keyed by absolute path).
+  it("ignores other repos' entries when scoped to a root", function()
+    triage.status_by_path = { ["/repo/a.lua"] = "approved", ["/elsewhere/b.lua"] = "changed" }
+    assert.equals("APPROVE", triage.verdict("/repo"))
   end)
 end)
 
