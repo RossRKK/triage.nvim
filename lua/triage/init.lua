@@ -91,7 +91,14 @@ end
 ---@return string[] lines, integer code
 local function sh(cmd, stdin)
   local co = assert(coroutine.running(), "review: git must run inside a coroutine")
-  vim.system(cmd, { text = true, stdin = stdin }, function(obj)
+  -- No optional locks: everything run here is a read-only query, but git status
+  -- opportunistically refreshes the index, and that lock-file churn is visible
+  -- to anything watching the git dir -- including watchers (the greeter's) that
+  -- respond by asking for another report, a permanent feedback loop.
+  vim.system(
+    cmd,
+    { text = true, stdin = stdin, env = { GIT_OPTIONAL_LOCKS = "0" } },
+    function(obj)
     vim.schedule(function()
       local lines = {}
       for line in (obj.stdout or ""):gmatch("[^\r\n]+") do
