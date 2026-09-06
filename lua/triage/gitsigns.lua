@@ -1,6 +1,11 @@
--- Thin wrapper around gitsigns' change_base, so triage never has to care
--- whether gitsigns is loaded yet. Setting a repo's base to the merge-base makes
--- the sign column show every line changed on the branch; nil restores HEAD.
+-- Thin wrapper around the sign column's change_base, so triage never has to
+-- care which one is drawing or whether it is loaded yet. Setting a repo's base
+-- to the merge-base makes the sign column show every line changed on the branch;
+-- nil restores the default (git's HEAD, jj's `@-`).
+--
+-- Two backends, because gitsigns cannot attach in a jj workspace: it needs a git
+-- repo, and a secondary jj workspace has none. jjsigns fills that gap and takes
+-- the same call, so review mode drives whichever is actually on screen.
 --
 -- Bases are per repo root and applied buffer-locally, never with gitsigns'
 -- global flag: review mode is a property of one repo, and a global base would
@@ -22,8 +27,7 @@ function M.buf_root(buf)
   if name == "" then
     return nil
   end
-  local root = vim.fs.root(name, ".git")
-  return root and vim.fs.normalize(root) or nil
+  return require("triage.vcs").root(name)
 end
 
 --- The review base a buffer should diff against, or nil for the default HEAD
@@ -43,6 +47,12 @@ end
 function M.set_base(root, base)
   root = vim.fs.normalize(root)
   M.bases[root] = base
+  -- jjsigns owns the gutter in a jj workspace and takes a revset; it keeps its
+  -- own per-root bases, so one call re-bases every buffer under this root.
+  local jj_ok, jjsigns = pcall(require, "jjsigns")
+  if jj_ok and (vim.uv or vim.loop).fs_stat(root .. "/.jj") then
+    return jjsigns.change_base(base, root)
+  end
   local ok, gs = pcall(require, "gitsigns")
   if not ok then
     return

@@ -65,13 +65,46 @@ M.target_override = {}
 
 local uv = vim.uv or vim.loop
 
+local vcs = require("triage.vcs")
+
+--- The VCS backend answering for a repo root (jj where `.jj` exists, else git).
+---@param root string
+---@return TriageBackend
+local function be(root)
+  return vcs.for_root(root)
+end
+
+--- Toplevel of the repo containing the cwd, or nil (async). Unlike cwd_root it
+--- sees through a symlinked cwd, because it asks the VCS rather than walking.
+---@return string?
+local function repo_root()
+  local backend = vcs.for_dir(vim.fn.getcwd())
+  return backend and backend.repo_root() or nil
+end
+
+--- The files a change is responsible for, generated files dropped.
+---@param root string
+---@param base string
+---@return table<string, true>?
+local function changed_files(root, base)
+  local backend = be(root)
+  local changed = backend.changed(root, base)
+  if not changed then
+    return nil
+  end
+  local kept = {}
+  for _, rel in ipairs(backend.filter_generated(root, vim.tbl_keys(changed))) do
+    kept[rel] = true
+  end
+  return kept
+end
+
 --- Normalized repo root containing the cwd, or nil. Sync (no git process) so
 --- the statusline and toggle can use it; walks the literal path, so unlike
 --- `git rev-parse` it won't see through a symlinked cwd.
 ---@return string?
 local function cwd_root()
-  local root = vim.fs.root(vim.fn.getcwd(), ".git")
-  return root and vim.fs.normalize(root) or nil
+  return vcs.root(vim.fn.getcwd())
 end
 
 --- Is review mode on for a repo (default: the cwd's)?
@@ -82,110 +115,18 @@ function M.is_enabled(root)
   return (root and M.enabled_roots[root]) == true
 end
 
---- Run a command asynchronously, yielding the current coroutine until it exits.
---- MUST be called from within a coroutine (refresh/mark drive one). Returns the
---- stdout lines and the exit code; stdout is returned even on a non-zero exit so
---- callers like merged_tree can read a conflicted merge's tree oid.
----@param cmd string[]
----@param stdin string? fed to the process (used to batch hash-object paths)
----@return string[] lines, integer code
-local function sh(cmd, stdin)
-  local co = assert(coroutine.running(), "review: git must run inside a coroutine")
-  -- No optional locks: everything run here is a read-only query, but git status
-  -- opportunistically refreshes the index, and that lock-file churn is visible
-  -- to anything watching the git dir -- including watchers (the greeter's) that
-  -- respond by asking for another report, a permanent feedback loop.
-  vim.system(
-    cmd,
-    { text = true, stdin = stdin, env = { GIT_OPTIONAL_LOCKS = "0" } },
-    function(obj)
-    vim.schedule(function()
-      local lines = {}
-      for line in (obj.stdout or ""):gmatch("[^\r\n]+") do
-        lines[#lines + 1] = line
-      end
-      coroutine.resume(co, lines, obj.code)
-    end)
-  end)
-  return coroutine.yield()
-end
 
---- Run git in `root` (async).
----@param root string
----@param args string[]
----@return string[]
-local function git(root, args)
-  local cmd = { "git", "-C", root }
-  vim.list_extend(cmd, args)
-  return (sh(cmd))
-end
 
---- Toplevel of the repo containing cwd, or nil if not in a work tree (async).
----@return string?
-local function repo_root()
-  local out = sh({ "git", "rev-parse", "--show-toplevel" })
-  local root = out[1]
-  return (root and root ~= "") and root or nil
-end
 
---- Best guess at the branch we're reviewing against.
----@param root string
----@return string?
-local function default_branch(root)
-  -- An explicitly configured base wins over auto-detection (opts.base, e.g.
-  -- "develop"); accept it bare or as an origin/ ref, whichever resolves first.
-  if M.opts.base and M.opts.base ~= "" then
-    for _, candidate in ipairs({ M.opts.base, "origin/" .. M.opts.base }) do
-      if #git(root, { "rev-parse", "--verify", "--quiet", candidate }) > 0 then
-        return candidate
-      end
-    end
-    return nil
-  end
-  -- Prefer the remote's advertised default (origin/HEAD -> origin/main|master).
-  local head = git(root, { "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD" })[1]
-  if head and head ~= "" then
-    return head
-  end
-  for _, candidate in ipairs({ "origin/main", "origin/master", "main", "master" }) do
-    if #git(root, { "rev-parse", "--verify", "--quiet", candidate }) > 0 then
-      return candidate
-    end
-  end
-  return nil
-end
 
 --- The branch the current branch is reviewed against: the user's override if set
 --- (<leader>rb / :ReviewBase), else the auto-detected default branch.
 ---@param root string normalized
 ---@return string?
 local function review_branch(root)
-  return M.target_override[root] or default_branch(root)
+  return M.target_override[root] or be(root).default_base(root, M.opts.base)
 end
 
---- The tree that would result from merging HEAD into the default branch — i.e.
---- the content of the merge commit you'd get by merging this branch. Returns the
---- tree object id, or nil.
----
---- This is the "what the merge actually applies" view: a file the branch changed
---- to content the default branch already reached contributes nothing, and a file
---- only the default branch changed is taken from there, so neither shows up as a
---- branch change. (Contrast the three-dot merge-base diff GitHub renders, which
---- would still show the former.)
----@param root string
----@param branch string default-branch ref
----@return string?
-local function merged_tree(root, branch)
-  -- `--write-tree` writes the merged tree and prints its oid on the first line.
-  -- On a conflicted merge git exits non-zero but still prints the tree oid first;
-  -- sh() keeps stdout regardless of exit code, so git() is fine here.
-  local out = git(root, { "merge-tree", "--write-tree", branch, "HEAD" })
-  local tree = out[1]
-  if not tree or not tree:match("^%x%x%x%x%x%x%x") then
-    return nil
-  end
-  return tree
-end
 
 -- ---------------------------------------------------------------------------
 -- Decision persistence (per repo, under stdpath("state")/review/).
@@ -268,90 +209,9 @@ local function save_decisions(root, decisions)
   vim.fn.writefile(lines, decisions_file(root))
 end
 
---- Current blob hash of a working-tree file, or nil.
----@param root string
----@param rel string
----@return string?
-local function blob_hash(root, rel)
-  local hash = git(root, { "hash-object", "--", rel })[1]
-  if not hash or hash == "" then
-    return nil
-  end
-  return hash
-end
 
---- Blob hashes for many working-tree files in ONE git process (rel -> hash),
---- instead of a spawn per file — refresh needs a hash for every decided file,
---- which is O(review size) on every save otherwise. `--stdin-paths` prints one
---- hash per input line in order, so the result aligns by index; but it aborts
---- on the first unreadable path, misaligning the rest, so a non-zero exit falls
---- back to per-file hashing (which simply skips the unreadable ones).
----@param root string
----@param rels string[]
----@return table<string, string>
-local function blob_hashes(root, rels)
-  local out = {}
-  if #rels == 0 then
-    return out
-  end
-  local lines, code =
-    sh({ "git", "-C", root, "hash-object", "--stdin-paths" }, table.concat(rels, "\n") .. "\n")
-  if code == 0 and #lines == #rels then
-    for i, rel in ipairs(rels) do
-      out[rel] = lines[i]
-    end
-    return out
-  end
-  for _, rel in ipairs(rels) do
-    out[rel] = blob_hash(root, rel)
-  end
-  return out
-end
 
---- Resolve a ref to its commit sha (cheap; used for cache keys).
----@param root string
----@param ref string
----@return string?
-local function rev(root, ref)
-  local sha = git(root, { "rev-parse", "--verify", "--quiet", ref })[1]
-  return (sha and sha ~= "") and sha or nil
-end
 
--- Cache of the expensive merge-result step, keyed by the two commits it depends
--- on. The merge tree — and therefore the set of files the merge changes — only
--- moves when HEAD or the base branch moves, so on a focus/save where neither
--- changed we skip `git merge-tree` (seconds on a big monorepo) entirely.
----@type { root: string, base: string, head: string, files: table<string, boolean> }?
-local merge_cache = nil
-
---- Files the merge of HEAD into `branch` would change vs the branch tip, as a
---- rel-path set. Memoised on (root, base sha, head sha).
----@param root string
----@param branch string
----@param base_sha string
----@param head_sha string
----@return table<string, boolean>?
-local function committed_changed(root, branch, base_sha, head_sha)
-  if
-    merge_cache
-    and merge_cache.root == root
-    and merge_cache.base == base_sha
-    and merge_cache.head == head_sha
-  then
-    return merge_cache.files
-  end
-
-  local tree = merged_tree(root, branch)
-  if not tree then
-    return nil
-  end
-  local files = {}
-  for _, rel in ipairs(git(root, { "diff", "--name-only", "--diff-filter=d", branch, tree })) do
-    files[rel] = true
-  end
-  merge_cache = { root = root, base = base_sha, head = head_sha, files = files }
-  return files
-end
 
 -- ---------------------------------------------------------------------------
 
@@ -386,89 +246,7 @@ local function deactivate(root)
   M.redraw_tree()
 end
 
---- Drop generated files from a rel-path list, by gitattribute. A repo that
---- marks its generated output (`*.pb.go linguist-generated=true`, the attribute
---- GitHub itself collapses diffs on; plain `generated` is honoured too) is
---- telling us those files aren't for a human to read — and in a repo with a
---- large codegen step they'd otherwise swamp the review with files nobody wrote.
----
---- One `git check-attr` process for the whole list, not one per file. Its output
---- is `<path>: <attr>: <value>` and a path may itself contain ": ", so each line
---- is parsed from the right.
----@param root string
----@param rels string[]
----@return string[]
-local function drop_generated(root, rels)
-  if #rels == 0 then
-    return rels
-  end
-  local lines, code = sh({
-    "git",
-    "-C",
-    root,
-    "check-attr",
-    "--stdin",
-    "linguist-generated",
-    "generated",
-  }, table.concat(rels, "\n") .. "\n")
-  -- On any trouble, review everything rather than silently hiding files.
-  if code ~= 0 then
-    return rels
-  end
-  local generated = {}
-  for _, line in ipairs(lines) do
-    local rel, _, value = line:match("^(.*): ([^:]+): (.*)$")
-    -- "set" for a bare attribute, the literal value for `attr=value`; anything
-    -- else ("unspecified", "unset", "false") leaves the file in the review.
-    if rel and (value == "set" or value == "true") then
-      generated[rel] = true
-    end
-  end
-  local kept = {}
-  for _, rel in ipairs(rels) do
-    if not generated[rel] then
-      kept[#kept + 1] = rel
-    end
-  end
-  return kept
-end
 
---- The files under review in `root`: what merging HEAD into `branch` would
---- change, plus the uncommitted work (staged + unstaged edits, and untracked
---- files) so you can review changes before committing them. Async; nil if the
---- merge-result diff can't be computed.
----@param root string
----@param branch string ref to review against
----@return table<string, boolean>? rel path -> true
-local function changed_files(root, branch)
-  local base_sha = rev(root, branch)
-  local head_sha = rev(root, "HEAD")
-  -- The merge-result diff, so files the branch changed to content the base
-  -- already has don't appear. Cached on the two shas, so it's free (no git)
-  -- when neither HEAD nor the base has moved since the last call.
-  local committed = base_sha and head_sha and committed_changed(root, branch, base_sha, head_sha)
-  if not committed then
-    return nil
-  end
-  local changed = {}
-  for rel in pairs(committed) do
-    changed[rel] = true
-  end
-  -- The cheap git calls, and they change on save, so they're recomputed every
-  -- time rather than cached.
-  for _, rel in ipairs(git(root, { "diff", "--name-only", "--diff-filter=d", "HEAD" })) do
-    changed[rel] = true
-  end
-  for _, rel in ipairs(git(root, { "ls-files", "--others", "--exclude-standard" })) do
-    changed[rel] = true
-  end
-  local rels = vim.tbl_keys(changed)
-  changed = {}
-  for _, rel in ipairs(drop_generated(root, rels)) do
-    changed[rel] = true
-  end
-  return changed
-end
 
 --- Apply the decision ledger to a changed-file set: each file's triage status,
 --- plus the decisions still worth keeping (a caller that owns the ledger prunes
@@ -490,7 +268,7 @@ local function decide(root, changed)
       decided[#decided + 1] = rel
     end
   end
-  local hashes = blob_hashes(root, decided)
+  local hashes = be(root).hashes(root, decided)
 
   for rel in pairs(changed) do
     local abs = vim.fs.normalize(root .. "/" .. rel)
@@ -517,7 +295,22 @@ local function decide(root, changed)
   return status_by_path, keep, decisions
 end
 
---- The async body of a refresh. Runs inside a coroutine; every git() call yields
+--- Snapshot the working copy before a refresh, where the VCS needs it.
+---
+--- Under jj the working copy is only part of the change once it has been
+--- snapshotted, and every query this plugin runs deliberately passes
+--- --ignore-working-copy so that reading state never writes an operation (which
+--- the greeter's op-log watcher would answer with another refresh, forever).
+--- Saving is the one moment where writing one operation is both wanted and
+--- self-limiting: it happens once per save, and the refresh it triggers writes
+--- none. Under git this is a no-op -- the working tree is already what the
+--- queries read.
+---@param root string
+local function snapshot(root)
+  be(root).snapshot(root)
+end
+
+--- The async body of a refresh. Runs inside a coroutine; every backend call yields
 --- without blocking the UI. Builds new state in locals and only commits it at the
 --- end, so a partial run never leaves half-updated tables on screen.
 ---@param mygen integer generation this run belongs to
@@ -538,6 +331,12 @@ local function do_refresh(mygen)
   local nroot = vim.fs.normalize(root)
   if not M.enabled_roots[nroot] then
     return deactivate(nroot)
+  end
+  -- Saved edits are only part of the change once jj has snapshotted them; under
+  -- git this does nothing.
+  snapshot(nroot)
+  if stale() then
+    return
   end
 
   local branch = review_branch(nroot)
@@ -638,7 +437,7 @@ function M.set_target(ref)
     if not root then
       return vim.notify("review: not in a git repo", vim.log.levels.WARN)
     end
-    if ref and not rev(root, ref) then
+    if ref and not be(root).rev(root, ref) then
       return vim.notify("review: no such ref: " .. ref, vim.log.levels.ERROR)
     end
     M.target_override[vim.fs.normalize(root)] = ref
@@ -755,44 +554,35 @@ function M.report(opts, cb)
   coroutine.wrap(function()
     local ok, err = pcall(function()
       local root = opts.root and vim.fs.normalize(opts.root) or nil
-      -- No explicit root: resolve the cwd's via git, which (unlike cwd_root)
-      -- sees through a symlinked cwd.
+      -- No explicit root: resolve the cwd's via the VCS, which (unlike
+      -- cwd_root) sees through a symlinked cwd.
       if not root then
         local found = repo_root()
         root = found and vim.fs.normalize(found) or nil
       end
-      if not root or #git(root, { "rev-parse", "--git-dir" }) == 0 then
+      if not root or not be(root).is_repo(root) then
         return vim.schedule(function()
           cb(nil)
         end)
       end
+      -- See snapshot(): under jj the working copy must be snapshotted before
+      -- the queries below can see it, and this is the only call here that
+      -- writes an operation. Under git it does nothing.
+      snapshot(root)
 
-      -- Both git directories in one call. For a linked worktree they differ:
-      -- the git dir is the worktree's own (HEAD, index, reflog), the common dir
-      -- is the MAIN checkout's .git (refs, packed-refs, FETCH_HEAD). Reported as
-      -- well as used here, so a caller can watch them for "the branch moved"
-      -- without shelling out for the paths itself.
-      local dirs =
-        git(root, { "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir" })
-      local git_dir = dirs[1] and vim.fs.normalize(dirs[1]) or nil
-      local common = dirs[2] and vim.fs.normalize(dirs[2]) or nil
-      -- The common dir's parent names the repo — "ionics", not the worktree
-      -- directory "rkk-some-branch".
-      local repo = common and vim.fn.fnamemodify(common, ":h:t") or nil
+      -- The directories to watch for "the change moved", reported as well as
+      -- used so a caller can watch them without shelling out for the paths
+      -- itself. Under git these are the worktree's own git dir and the main
+      -- checkout's common dir; under jj, the operation head (see vcs/jj.lua).
+      -- `repo` names the project rather than the checkout directory.
+      local backend = be(root)
+      local git_dir, common, repo = backend.dirs(root)
 
-      local branch = git(root, { "symbolic-ref", "--quiet", "--short", "HEAD" })[1]
-      local head = git(root, { "rev-parse", "--short", "HEAD" })[1]
-      local upstream =
-        git(root, { "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}" })[1]
+      local branch, head, upstream = backend.head(root)
 
-      --- behind, ahead across `ref...HEAD` (nil if the ref doesn't resolve).
+      --- behind, ahead between a ref and the working state.
       local function span(ref)
-        local out = git(root, { "rev-list", "--left-right", "--count", ref .. "...HEAD" })[1]
-        if not out then
-          return nil, nil
-        end
-        local behind, ahead = out:match("^(%d+)%s+(%d+)$")
-        return tonumber(behind), tonumber(ahead)
+        return backend.span(root, ref)
       end
 
       local behind, ahead
@@ -823,7 +613,7 @@ function M.report(opts, cb)
         end)
       end
 
-      local dirty = #git(root, { "status", "--porcelain", "--untracked-files=normal" })
+      local dirty = backend.dirty(root)
 
       local report = {
         root = root,
@@ -919,7 +709,7 @@ function M.mark(status, abs)
       for _, path in ipairs(targets) do
         rels[#rels + 1] = path:sub(#nroot + 2)
       end
-      local hashes = status and blob_hashes(root, rels) or {}
+      local hashes = status and be(root).hashes(root, rels) or {}
       for _, rel in ipairs(rels) do
         if status then
           if hashes[rel] then
@@ -1114,7 +904,7 @@ function M.setup(opts)
     local refs = vim.fn.systemlist({
       "git",
       "-C",
-      vim.fs.root(0, ".git") or vim.fn.getcwd(),
+      vcs.root(vim.fn.expand("%:p:h")) or vim.fn.getcwd(),
       "for-each-ref",
       "--format=%(refname:short)",
       "refs/heads",
