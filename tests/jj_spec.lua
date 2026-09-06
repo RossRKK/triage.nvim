@@ -36,7 +36,10 @@ local function diverged_repo()
     assert.equals(0, out.code, "jj " .. table.concat({ ... }, " ") .. ": " .. (out.stderr or ""))
     return out.stdout
   end
-  jj("git", "init")
+  -- Not colocated: jj 0.41 colocates by default, but a .git dir puts gitsigns
+  -- (and git refs) back in charge -- see triage.gitsigns.jj_owns. The revset
+  -- paths under test are the ones for a jj-only workspace.
+  jj("git", "init", "--config", "git.colocate=false")
   -- No remote here, and jj's default trunk() falls back to root() without one.
   jj("config", "set", "--repo", 'revset-aliases."trunk()"', "master")
   vim.fn.writefile({ "a" }, root .. "/base.txt")
@@ -101,6 +104,57 @@ describe("triage.toggle_diff base in a jj workspace", function()
   -- literal "origin/main", which is not a revset jj can show a file at.
   it("hands jjsigns a revset, not a git ref name", function()
     assert.equals("trunk()", require("triage")._diff_base(vim.fs.normalize(root)))
+  end)
+
+  -- Colocated, gitsigns draws: git resolves refs, not revsets, so the base must
+  -- come back as a ref name -- a revset there silently matches nothing.
+  it("hands gitsigns a git ref in a colocated repo", function()
+    local colocated = vim.fn.tempname()
+    vim.fn.mkdir(colocated, "p")
+    vim.system({ "jj", "--color=never", "git", "init" }, { cwd = colocated }):wait()
+    local base = require("triage")._diff_base(vim.fs.normalize(colocated))
+    vim.fn.delete(colocated, "rf")
+    assert.equals("origin/main", base)
+  end)
+
+  -- Review mode's base comes from the VCS backend, and `.jj` picks the jj one
+  -- even when colocated -- so it hands the gitsigns gutter a revset. gitsigns
+  -- attaching with one dies on "Not a valid object name", losing the attach
+  -- outright: no signs, and the inline diff toggles nothing. The commit id is
+  -- the name both languages accept.
+  it("resolves a revset to a commit id before the gitsigns gutter sees it", function()
+    local gsbase = require("triage.gitsigns")
+    local colocated = vim.fn.tempname()
+    vim.fn.mkdir(colocated, "p")
+    local function jj(...)
+      local out = vim
+        .system(
+          { "jj", "--color=never", "--no-pager", ... },
+          { cwd = colocated, text = true, env = { JJ_USER = "t", JJ_EMAIL = "t@t" } }
+        )
+        :wait()
+      assert.equals(0, out.code, "jj " .. table.concat({ ... }, " ") .. ": " .. (out.stderr or ""))
+      return out.stdout
+    end
+    jj("git", "init", "--config", "git.colocate=true")
+    jj("config", "set", "--repo", 'revset-aliases."trunk()"', "master")
+    vim.fn.writefile({ "a" }, colocated .. "/base.txt")
+    jj("commit", "-m", "A")
+    jj("bookmark", "create", "master", "-r", "@-")
+    local want = vim.trim(jj("log", "--no-graph", "-r", "trunk()", "-T", "commit_id"))
+
+    local nroot = vim.fs.normalize(colocated)
+    gsbase.set_base(nroot, "trunk()")
+    local got = gsbase.bases[nroot]
+    -- A ref git owns is not jj revset syntax (`origin/main` is `main@origin`),
+    -- so it must survive untouched rather than being dropped as unresolvable.
+    gsbase.set_base(nroot, "origin/main")
+    local passthrough = gsbase.bases[nroot]
+    gsbase.bases[nroot] = nil
+    vim.fn.delete(colocated, "rf")
+
+    assert.equals(want, got)
+    assert.equals("origin/main", passthrough)
   end)
 
   -- A refresh that finds review mode off deactivates the repo, which used to

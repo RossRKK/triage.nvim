@@ -763,7 +763,9 @@ local function diff_base(root)
   -- Sync calls (this runs outside the coroutine paths the backends expect),
   -- anchored on the buffer's repo rather than nvim's cwd, which may be elsewhere.
   root = root or vim.fn.getcwd()
-  if (vim.uv or vim.loop).fs_stat(root .. "/.jj") then
+  -- Only where jjsigns is the gutter: a colocated repo draws with gitsigns,
+  -- which needs a git ref, and a revset there resolves to nothing.
+  if require("triage.gitsigns").jj_owns(root) then
     -- jj names the default branch directly. `present()` so a repo with no trunk
     -- (no remote, no main/master) yields nothing rather than an error; fall back
     -- to the parent of the working copy, which is what jjsigns diffs against by
@@ -814,10 +816,10 @@ function M.toggle_diff()
     vim.notify("review: not in a repo", vim.log.levels.WARN)
     return
   end
-  -- jjsigns owns the gutter in a jj workspace (gitsigns cannot attach there) and
-  -- has the same three-in-one inline view; gitsigns everywhere else.
-  local jj_ok, jjsigns = pcall(require, "jjsigns")
-  local use_jj = jj_ok and (vim.uv or vim.loop).fs_stat(root .. "/.jj") ~= nil
+  -- jjsigns owns the gutter where gitsigns cannot attach (a secondary jj
+  -- workspace) and has the same three-in-one inline view; gitsigns everywhere
+  -- else, including a colocated jj repo where jjsigns stands down.
+  local use_jj = gsbase.jj_owns(root)
   local ok, gs = pcall(require, "gitsigns")
   if not use_jj and not ok then
     vim.notify("review: gitsigns not available", vim.log.levels.WARN)
@@ -825,7 +827,10 @@ function M.toggle_diff()
   end
   M.inline_diff = not M.inline_diff
   if use_jj then
-    jjsigns.toggle_inline(M.inline_diff)
+    local jj_ok, jjsigns = pcall(require, "jjsigns")
+    if jj_ok then
+      jjsigns.toggle_inline(M.inline_diff)
+    end
   else
     gs.toggle_deleted(M.inline_diff)
     gs.toggle_linehl(M.inline_diff)
