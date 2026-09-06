@@ -115,10 +115,6 @@ function M.is_enabled(root)
   return (root and M.enabled_roots[root]) == true
 end
 
-
-
-
-
 --- The branch the current branch is reviewed against: the user's override if set
 --- (<leader>rb / :ReviewBase), else the auto-detected default branch.
 ---@param root string normalized
@@ -126,7 +122,6 @@ end
 local function review_branch(root)
   return M.target_override[root] or be(root).default_base(root, M.opts.base)
 end
-
 
 -- ---------------------------------------------------------------------------
 -- Decision persistence (per repo, under stdpath("state")/review/).
@@ -209,10 +204,6 @@ local function save_decisions(root, decisions)
   vim.fn.writefile(lines, decisions_file(root))
 end
 
-
-
-
-
 -- ---------------------------------------------------------------------------
 
 -- Bumped on every refresh; an in-flight async run whose generation is stale
@@ -242,11 +233,16 @@ local function deactivate(root)
     end
   end
   M.reviews[root] = nil
-  require("triage.gitsigns").set_base(root, nil)
+  -- The inline diff (M.toggle_diff) borrows the base while it is on; a refresh
+  -- that finds review mode off must not yank it back to HEAD under the view.
+  -- Review mode is off now, so that is what the view restores when it closes.
+  if M.inline_diff and M._diff_prev and M._diff_prev.root == root then
+    M._diff_prev.base = nil
+  else
+    require("triage.gitsigns").set_base(root, nil)
+  end
   M.redraw_tree()
 end
-
-
 
 --- Apply the decision ledger to a changed-file set: each file's triage status,
 --- plus the decisions still worth keeping (a caller that owns the ledger prunes
@@ -764,12 +760,34 @@ local function diff_base(root)
   if root and M.target_override[root] then
     return M.target_override[root]
   end
-  -- Sync call (this runs outside the coroutine paths): anchor it on the current
-  -- buffer's repo rather than nvim's cwd, which may be elsewhere.
+  -- Sync calls (this runs outside the coroutine paths the backends expect),
+  -- anchored on the buffer's repo rather than nvim's cwd, which may be elsewhere.
+  root = root or vim.fn.getcwd()
+  if (vim.uv or vim.loop).fs_stat(root .. "/.jj") then
+    -- jj names the default branch directly. `present()` so a repo with no trunk
+    -- (no remote, no main/master) yields nothing rather than an error; fall back
+    -- to the parent of the working copy, which is what jjsigns diffs against by
+    -- default. A git ref name like "origin/main" is NOT a revset, so this must
+    -- never take the git path below.
+    local has_trunk = vim.fn.systemlist({
+      "jj",
+      "-R",
+      root,
+      "--ignore-working-copy",
+      "--color=never",
+      "log",
+      "--no-graph",
+      "-r",
+      "present(trunk())",
+      "-T",
+      "'x'",
+    })[1]
+    return (has_trunk and has_trunk ~= "") and "trunk()" or "@-"
+  end
   local default = vim.fn.systemlist({
     "git",
     "-C",
-    root or vim.fn.getcwd(),
+    root,
     "symbolic-ref",
     "--quiet",
     "--short",
@@ -777,6 +795,8 @@ local function diff_base(root)
   })[1]
   return (default and default ~= "") and default or "origin/main"
 end
+-- Exposed for tests; the keymap goes through toggle_diff.
+M._diff_base = diff_base
 
 -- Combined inline diff: deleted lines rendered inline as virtual text and
 -- changed lines (word-level) highlighted on the file buffer itself, against the
@@ -788,23 +808,31 @@ M.inline_diff = false
 --- of the current buffer's repo (even if the sign-column review mode is off);
 --- restore that repo's prior base when off.
 function M.toggle_diff()
-  local ok, gs = pcall(require, "gitsigns")
-  if not ok then
-    vim.notify("review: gitsigns not available", vim.log.levels.WARN)
-    return
-  end
   local gsbase = require("triage.gitsigns")
   local root = gsbase.buf_root(0) or cwd_root()
   if not root then
-    vim.notify("review: not in a git repo", vim.log.levels.WARN)
+    vim.notify("review: not in a repo", vim.log.levels.WARN)
+    return
+  end
+  -- jjsigns owns the gutter in a jj workspace (gitsigns cannot attach there) and
+  -- has the same three-in-one inline view; gitsigns everywhere else.
+  local jj_ok, jjsigns = pcall(require, "jjsigns")
+  local use_jj = jj_ok and (vim.uv or vim.loop).fs_stat(root .. "/.jj") ~= nil
+  local ok, gs = pcall(require, "gitsigns")
+  if not use_jj and not ok then
+    vim.notify("review: gitsigns not available", vim.log.levels.WARN)
     return
   end
   M.inline_diff = not M.inline_diff
-  gs.toggle_deleted(M.inline_diff)
-  gs.toggle_linehl(M.inline_diff)
-  gs.toggle_word_diff(M.inline_diff)
-  -- set_base refreshes gitsigns, which is what renders the toggles above; do it
-  -- last so enabling and disabling both repaint in one pass.
+  if use_jj then
+    jjsigns.toggle_inline(M.inline_diff)
+  else
+    gs.toggle_deleted(M.inline_diff)
+    gs.toggle_linehl(M.inline_diff)
+    gs.toggle_word_diff(M.inline_diff)
+  end
+  -- set_base refreshes the gutter, which is what renders the toggles above; do
+  -- it last so enabling and disabling both repaint in one pass.
   if M.inline_diff then
     M._diff_prev = { root = root, base = gsbase.bases[root] }
     gsbase.set_base(root, diff_base(root))
@@ -872,7 +900,7 @@ function M.setup(opts)
     -- Inline diff (M.toggle_diff) word-level highlight. gitsigns defaults these
     -- to TermCursor (a loud, wrong-hued cyan in most themes). Give each its own
     -- diff hue — the sign colour (green add / blue change / red delete) tinted
-    -- 40% over the line background — so the within-line marks pop in the right
+    -- 70% over the line background — so the within-line marks pop in the right
     -- colour instead of blue-on-red. Force (no default) to beat gitsigns' link;
     -- falls back to DiffText if the theme leaves a group's colours unset.
     local inline = {
@@ -884,7 +912,7 @@ function M.setup(opts)
       local hue = hl_attr(ref.sign, "fg")
       local line_bg = hl_attr(ref.line, "bg")
       if hue and line_bg then
-        vim.api.nvim_set_hl(0, group, { bg = blend(hue, line_bg, 0.4) })
+        vim.api.nvim_set_hl(0, group, { bg = blend(hue, line_bg, 0.7) })
       else
         vim.api.nvim_set_hl(0, group, { link = "DiffText" })
       end

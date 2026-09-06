@@ -12,22 +12,27 @@ local M = {}
 --- can read a conflicted merge's tree oid.
 ---@param cmd string[]
 ---@param stdin string? fed to the process (used to batch hash-object paths)
+---@param cwd string? working directory for the process
 ---@return string[] lines, integer code
-function M.sh(cmd, stdin)
+function M.sh(cmd, stdin, cwd)
   local co = assert(coroutine.running(), "triage: vcs commands must run inside a coroutine")
   -- No optional locks: everything run here is a read-only query, but git status
   -- opportunistically refreshes the index, and that lock-file churn is visible
   -- to anything watching the git dir -- including watchers (the greeter's) that
   -- respond by asking for another report, a permanent feedback loop.
-  vim.system(cmd, { text = true, stdin = stdin, env = { GIT_OPTIONAL_LOCKS = "0" } }, function(obj)
-    vim.schedule(function()
-      local lines = {}
-      for line in (obj.stdout or ""):gmatch("[^\r\n]+") do
-        lines[#lines + 1] = line
-      end
-      coroutine.resume(co, lines, obj.code)
-    end)
-  end)
+  vim.system(
+    cmd,
+    { text = true, stdin = stdin, cwd = cwd, env = { GIT_OPTIONAL_LOCKS = "0" } },
+    function(obj)
+      vim.schedule(function()
+        local lines = {}
+        for line in (obj.stdout or ""):gmatch("[^\r\n]+") do
+          lines[#lines + 1] = line
+        end
+        coroutine.resume(co, lines, obj.code)
+      end)
+    end
+  )
   return coroutine.yield()
 end
 

@@ -21,13 +21,16 @@ local M = {}
 M.marker = ".jj"
 
 --- Run jj in `root` (async), never snapshotting.
+---
+--- Run with `root` as the cwd, not only `-R root`: jj prints paths relative to
+--- the process cwd, and the callers join them onto the root.
 ---@param root string
 ---@param args string[]
 ---@return string[] lines, integer code
 local function jj(root, args)
   local cmd = { "jj", "--ignore-working-copy", "--color=never", "--no-pager", "-R", root }
   vim.list_extend(cmd, args)
-  return sh.sh(cmd)
+  return sh.sh(cmd, nil, root)
 end
 
 -- Roots already reported as stale, so the notice below is shown once rather
@@ -180,16 +183,19 @@ end
 
 --- Files this change is responsible for, relative to `base`.
 ---
---- One command, and no merge-result machinery: the git backend has to build a
---- merged tree so that files changed to content the base already has drop out,
---- because a git branch can sit behind its base. jj rebases instead of merging,
---- so `@` is already expressed on top of trunk and a plain two-point diff has
---- the same meaning.
+--- Diffed from the fork point, not from `base` itself. A change can sit behind
+--- its base -- a branch never rebased onto a trunk that moved on -- and a plain
+--- `--from base` diff would then list every upstream file in reverse, as if
+--- this change had undone them. `fork_point(base | @)` is jj's merge base, so
+--- this is the `base...HEAD` the git backend uses. Still one command, and no
+--- merged tree: a change that IS on top of its base has the base as its fork
+--- point, and the two diffs are the same.
 ---@param root string
 ---@param base string revset
 ---@return table<string, true>?
 function M.changed(root, base)
-  local lines, code = jj(root, { "diff", "--from", base, "--to", "@", "--summary" })
+  local from = "fork_point(" .. base .. " | @)"
+  local lines, code = jj(root, { "diff", "--from", from, "--to", "@", "--summary" })
   if code ~= 0 then
     return nil
   end
@@ -281,7 +287,9 @@ function M.snapshot(root)
     warned_stale[root] = true
     vim.schedule(function()
       vim.notify(
-        "triage: jj working copy is stale in " .. vim.fs.basename(root) .. "\nrun `jj workspace update-stale` to catch it up",
+        "triage: jj working copy is stale in "
+          .. vim.fs.basename(root)
+          .. "\nrun `jj workspace update-stale` to catch it up",
         vim.log.levels.WARN
       )
     end)
