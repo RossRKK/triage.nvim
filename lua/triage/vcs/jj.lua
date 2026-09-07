@@ -122,8 +122,18 @@ end
 ---@param root string
 ---@return string? branch, string? head, string? upstream
 function M.head(root)
-  local branch = field(root, 'bookmarks.join(",")', "latest(heads(::@ & bookmarks()), 1)")
-  branch = branch and vim.split(branch, ",", { plain = true })[1] or nil
+  local names = field(root, 'bookmarks.join(",")', "latest(heads(::@ & bookmarks()), 1)")
+  -- The `bookmarks` template also lists remote bookmarks that sit on the commit
+  -- without a local twin (`master@origin` once local master has moved on), and
+  -- it sorts them in with the local ones. The change is named after a local
+  -- bookmark -- the revset matched on one -- so skip anything with a remote.
+  local branch
+  for _, name in ipairs(names and vim.split(names, ",", { plain = true }) or {}) do
+    if name ~= "" and not name:find("@", 1, true) then
+      branch = name
+      break
+    end
+  end
   local head = field(root, "change_id.shortest(8)")
   local upstream
   if branch then
