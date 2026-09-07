@@ -178,3 +178,32 @@ describe("triage.toggle_diff base in a jj workspace", function()
     assert.equals("trunk()", gsbase.bases[nroot])
   end)
 end)
+
+describe("triage.vcs.jj.head", function()
+  if not has_jj then
+    pending("jj not installed")
+    return
+  end
+  local backend = require("triage.vcs.jj")
+
+  it("names the change after a local bookmark, not a stale remote one", function()
+    local root, jj = diverged_repo()
+    -- Push master so origin knows it, then move local master on. The pushed
+    -- commit now carries `master@origin` beside any local bookmark, which is
+    -- what a workspace forked off master looks like once master advances.
+    local remote = vim.fn.tempname()
+    vim.fn.mkdir(remote, "p")
+    vim.system({ "git", "init", "--bare", "-q", remote }):wait()
+    jj("git", "remote", "add", "origin", remote)
+    jj("git", "push", "--bookmark", "master", "--allow-new")
+    jj("bookmark", "create", "rkk/feat", "-r", "master")
+    jj("bookmark", "set", "master", "-r", "@", "--allow-backwards")
+    jj("new", "rkk/feat")
+    local names = jj("log", "-r", "rkk/feat", "--no-graph", "-T", 'bookmarks ++ "\\n"')
+    assert.truthy(names:find("master@origin", 1, true), "setup: expected a remote bookmark, got " .. names)
+    local branch = run(function()
+      return backend.head(root)
+    end)
+    assert.equals("rkk/feat", branch)
+  end)
+end)
