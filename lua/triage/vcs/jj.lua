@@ -86,7 +86,10 @@ end
 ---@param root string
 ---@return string? git_dir, string? common_dir, string? repo
 function M.dirs(root)
-  local heads = root .. "/.jj/repo/op_heads/heads"
+  -- From the MAIN workspace: in a secondary workspace `.jj/repo` is a file
+  -- pointing there, so the path under `root` does not exist and the watch
+  -- would fail silently, freezing the title on the bookmark it opened with.
+  local heads = M.origin(root) .. "/.jj/repo/op_heads/heads"
   return heads, heads, vim.fs.basename(M.origin(root))
 end
 

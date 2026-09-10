@@ -207,3 +207,25 @@ describe("triage.vcs.jj.head", function()
     assert.equals("rkk/feat", branch)
   end)
 end)
+
+describe("triage.vcs.jj.dirs", function()
+  if not has_jj then
+    pending("jj not installed")
+    return
+  end
+  local backend = require("triage.vcs.jj")
+
+  it("watches the main workspace's op heads from a secondary workspace", function()
+    local root, jj = diverged_repo()
+    local secondary = vim.fn.tempname()
+    jj("workspace", "add", secondary)
+    -- `.jj/repo` is a file in the secondary workspace, so a path built under
+    -- it does not exist and the greeter's watch would fail silently.
+    local git_dir, common_dir, repo = backend.dirs(secondary)
+    assert.equals(root .. "/.jj/repo/op_heads/heads", git_dir)
+    assert.equals(git_dir, common_dir)
+    assert.equals(vim.fs.basename(root), repo)
+    local stat = vim.uv.fs_stat(git_dir)
+    assert.truthy(stat and stat.type == "directory", "op heads dir should exist")
+  end)
+end)
