@@ -186,6 +186,24 @@ function M.default_base(root, configured)
   return count(root, "present(trunk())") > 0 and "trunk()" or nil
 end
 
+--- Where this change forked from `base`, as a revset: the base the gutter must
+--- diff against. The review compares master with the result of merging the
+--- change into it, so only the change's own lines count. The gutter can only
+--- diff the buffer, whose lines are the change's, against one revision -- and
+--- the one revision that yields exactly those lines is the fork point. The
+--- trunk tip is wrong as soon as trunk moves on: every upstream commit then
+--- shows up in reverse. A change that sits on top of `base` has `base` as its
+--- fork point, so nothing changes for a freshly rebased one.
+---
+--- A revset, not a resolved id, so jjsigns can take it as is; the colocated
+--- path resolves it to a commit id for gitsigns (triage.gitsigns).
+---@param root string
+---@param base string revset
+---@return string revset
+function M.fork_point(root, base)
+  return "fork_point(" .. base .. " | @)"
+end
+
 --- Resolve a revset to a stable id (used only as a cache key).
 ---@param root string
 ---@param ref string
