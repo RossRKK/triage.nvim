@@ -397,10 +397,11 @@ local function do_refresh(mygen)
   if next(decisions) then
     save_decisions(root, still)
   end
-  -- Per-line signs: diff the buffer against the default-branch tip, so a line
-  -- that matches what's already on the branch shows no sign — consistent with
-  -- the merge-result file list above.
-  require("triage.gitsigns").set_base(nroot, branch)
+  -- Per-line signs: diff the buffer against the point where this change forked
+  -- from the branch, so only the change's own lines carry a sign -- consistent
+  -- with the merge-result file list above. The branch TIP would also paint
+  -- every commit the branch gained since the fork, in reverse.
+  require("triage.gitsigns").set_base(nroot, be(nroot).fork_point(nroot, branch))
   M.redraw_tree()
 end
 
@@ -747,9 +748,9 @@ function M.toggle()
 end
 
 --- Ref the diff view compares against for the current buffer's repo: the review
---- base if review mode set one, else the default branch tip — so the diff still
---- shows branch-level changes when the sign-column review mode is off (mirrors
---- the fallback in git.lua).
+--- base if review mode set one, else the fork point from the default branch — so
+--- the diff still shows branch-level changes when the sign-column review mode
+--- is off (mirrors the fallback in git.lua).
 ---@param root string? the buffer's repo root
 ---@return string
 local function diff_base(root)
@@ -757,12 +758,10 @@ local function diff_base(root)
   if base then
     return base
   end
-  if root and M.target_override[root] then
-    return M.target_override[root]
-  end
   -- Sync calls (this runs outside the coroutine paths the backends expect),
   -- anchored on the buffer's repo rather than nvim's cwd, which may be elsewhere.
   root = root or vim.fn.getcwd()
+  local override = M.target_override[root]
   -- Only where jjsigns is the gutter: a colocated repo draws with gitsigns,
   -- which needs a git ref, and a revset there resolves to nothing.
   if require("triage.gitsigns").jj_owns(root) then
@@ -771,6 +770,9 @@ local function diff_base(root)
     -- to the parent of the working copy, which is what jjsigns diffs against by
     -- default. A git ref name like "origin/main" is NOT a revset, so this must
     -- never take the git path below.
+    if override then
+      return require("triage.vcs.jj").fork_point(root, override)
+    end
     local has_trunk = vim.fn.systemlist({
       "jj",
       "-R",
@@ -784,18 +786,27 @@ local function diff_base(root)
       "-T",
       "'x'",
     })[1]
-    return (has_trunk and has_trunk ~= "") and "trunk()" or "@-"
+    if not (has_trunk and has_trunk ~= "") then
+      return "@-"
+    end
+    return require("triage.vcs.jj").fork_point(root, "trunk()")
   end
-  local default = vim.fn.systemlist({
-    "git",
-    "-C",
-    root,
-    "symbolic-ref",
-    "--quiet",
-    "--short",
-    "refs/remotes/origin/HEAD",
-  })[1]
-  return (default and default ~= "") and default or "origin/main"
+  local default = override
+    or vim.fn.systemlist({
+      "git",
+      "-C",
+      root,
+      "symbolic-ref",
+      "--quiet",
+      "--short",
+      "refs/remotes/origin/HEAD",
+    })[1]
+  default = (default and default ~= "") and default or "origin/main"
+  -- The fork point, for the same reason as the review gutter: the branch tip
+  -- would paint upstream commits in reverse. Falls back to the ref name where
+  -- git has no merge base to offer (no such ref, unrelated histories).
+  local sha = vim.fn.systemlist({ "git", "-C", root, "merge-base", default, "HEAD" })[1]
+  return (vim.v.shell_error == 0 and sha and sha:match("^%x+$")) and sha or default
 end
 -- Exposed for tests; the keymap goes through toggle_diff.
 M._diff_base = diff_base

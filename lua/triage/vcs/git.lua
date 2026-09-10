@@ -101,6 +101,18 @@ function M.default_base(root, configured)
   return nil
 end
 
+--- Where HEAD forked from `branch`: the sha the gutter diffs against. See the
+--- jj backend's fork_point for why the tip is wrong once the branch moves on.
+--- Falls back to `branch` itself when git cannot find a merge base (unrelated
+--- histories, or a ref that does not resolve), which is the old behaviour.
+---@param root string
+---@param branch string
+---@return string
+function M.fork_point(root, branch)
+  local sha = git(root, { "merge-base", branch, "HEAD" })[1]
+  return (sha and sha:match("^%x+$")) and sha or branch
+end
+
 --- Resolve a ref to its commit sha (cheap; used for cache keys).
 ---@param root string
 ---@param ref string

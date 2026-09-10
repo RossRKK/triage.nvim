@@ -103,7 +103,7 @@ describe("triage.toggle_diff base in a jj workspace", function()
   -- The old path shelled out to git, and without a .git it fell back to the
   -- literal "origin/main", which is not a revset jj can show a file at.
   it("hands jjsigns a revset, not a git ref name", function()
-    assert.equals("trunk()", require("triage")._diff_base(vim.fs.normalize(root)))
+    assert.equals("fork_point(trunk() | @)", require("triage")._diff_base(vim.fs.normalize(root)))
   end)
 
   -- Colocated, gitsigns draws: git resolves refs, not revsets, so the base must
@@ -179,6 +179,49 @@ describe("triage.toggle_diff base in a jj workspace", function()
   end)
 end)
 
+describe("triage review gutter base in a jj workspace", function()
+  if not has_jj then
+    pending("jj not installed")
+    return
+  end
+  local root, jj
+
+  before_each(function()
+    root, jj = diverged_repo()
+  end)
+
+  after_each(function()
+    vim.fn.delete(root, "rf")
+  end)
+
+  -- The gutter used to get the trunk TIP. With master moved on (B), diffing the
+  -- buffer against it painted B's edit to base.txt in reverse, as if this change
+  -- had undone it. The fork point (A) is the one revision whose diff to the
+  -- buffer is exactly this change's lines.
+  it("diffs against the fork point, not the trunk tip", function()
+    local triage = require("triage")
+    local gsbase = require("triage.gitsigns")
+    local nroot = vim.fs.normalize(root)
+    local prev_cwd = vim.fn.getcwd()
+    vim.cmd.cd(root)
+    triage.enabled_roots[nroot] = true
+    triage.refresh()
+    vim.wait(1500)
+    vim.cmd.cd(prev_cwd)
+    triage.enabled_roots[nroot] = nil
+    local got = gsbase.bases[nroot]
+    gsbase.bases[nroot] = nil
+
+    assert.equals("fork_point(trunk() | @)", got)
+    -- And that revset really is A, not master's tip B.
+    local function id(rev)
+      return vim.trim(jj("log", "--no-graph", "-r", rev, "-T", "commit_id"))
+    end
+    assert.equals(id("description(exact:'A\n')"), id(got))
+    assert.is_not.equals(id("trunk()"), id(got))
+  end)
+end)
+
 describe("triage.vcs.jj.head", function()
   if not has_jj then
     pending("jj not installed")
@@ -200,7 +243,10 @@ describe("triage.vcs.jj.head", function()
     jj("bookmark", "set", "master", "-r", "@", "--allow-backwards")
     jj("new", "rkk/feat")
     local names = jj("log", "-r", "rkk/feat", "--no-graph", "-T", 'bookmarks ++ "\\n"')
-    assert.truthy(names:find("master@origin", 1, true), "setup: expected a remote bookmark, got " .. names)
+    assert.truthy(
+      names:find("master@origin", 1, true),
+      "setup: expected a remote bookmark, got " .. names
+    )
     local branch = run(function()
       return backend.head(root)
     end)
