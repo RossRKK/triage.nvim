@@ -235,10 +235,25 @@ function M.changed(root, base)
     -- "<letter> <path>"; D(eleted) files have nothing to open or review.
     local status, rel = line:match("^(%a) (.+)$")
     if rel and status ~= "D" then
-      files[rel] = true
+      files[M.summary_path(rel)] = true
     end
   end
   return files
+end
+
+--- The on-disk path of a `jj diff --summary` entry.
+---
+--- Renames and copies are printed with the differing part in braces, sharing
+--- the prefix and suffix: "a/{x => y/src}/s.toml", or "{q.txt => zz.txt}"
+--- when nothing is shared. Only the new side exists in the working copy, so
+--- that is the path to review; taken literally, the braced form named a file
+--- that could never be hashed or marked, and its folder stayed "changed".
+---@param rel string
+---@return string
+function M.summary_path(rel)
+  local path = rel:gsub("{[^{}]-=> ?([^{}]*)}", "%1")
+  -- "a/{x => }/s.toml" leaves "a//s.toml" once the old side goes.
+  return (path:gsub("//+", "/"))
 end
 
 --- How many files the working copy changes (the "uncommitted" count).
