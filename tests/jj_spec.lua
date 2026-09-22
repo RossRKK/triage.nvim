@@ -43,6 +43,8 @@ local function diverged_repo()
   -- No remote here, and jj's default trunk() falls back to root() without one.
   jj("config", "set", "--repo", 'revset-aliases."trunk()"', "master")
   vim.fn.writefile({ "a" }, root .. "/base.txt")
+  vim.fn.mkdir(root .. "/a/x", "p")
+  vim.fn.writefile({ "s" }, root .. "/a/x/s.toml")
   jj("commit", "-m", "A")
   -- Move master on with B first, then fork the change off A, so master has a
   -- commit the change lacks. B edits a file the change also has: a two-point
@@ -63,10 +65,10 @@ describe("triage.vcs.jj.changed", function()
     return
   end
   local backend = require("triage.vcs.jj")
-  local root
+  local root, jj_cmd
 
   before_each(function()
-    root = diverged_repo()
+    root, jj_cmd = diverged_repo()
   end)
 
   after_each(function()
@@ -82,6 +84,38 @@ describe("triage.vcs.jj.changed", function()
       return backend.changed(root, base)
     end)
     assert.same({ ["ours.txt"] = true }, files)
+  end)
+
+  it("lists a renamed file under its new path, not jj's {old => new} form", function()
+    -- Rename inside the change, so the summary prints "a/{x => y/src}/s.toml".
+    vim.fn.mkdir(root .. "/a/y/src", "p")
+    assert.equals(0, vim.fn.rename(root .. "/a/x/s.toml", root .. "/a/y/src/s.toml"))
+    -- The backend never snapshots (--ignore-working-copy), so snapshot here.
+    jj_cmd("describe", "-m", "rename")
+    local files = run(function()
+      return backend.changed(root, "trunk()")
+    end)
+    assert.same({ ["ours.txt"] = true, ["a/y/src/s.toml"] = true }, files)
+  end)
+end)
+
+describe("triage.vcs.jj.summary_path", function()
+  local backend = require("triage.vcs.jj")
+
+  it("leaves a plain path alone", function()
+    assert.equals("a/b.txt", backend.summary_path("a/b.txt"))
+  end)
+
+  it("keeps the new side of a rename with a shared prefix and suffix", function()
+    assert.equals("a/y/src/s.toml", backend.summary_path("a/{x => y/src}/s.toml"))
+  end)
+
+  it("keeps the new side of a rename with nothing shared", function()
+    assert.equals("zz.txt", backend.summary_path("{q.txt => zz.txt}"))
+  end)
+
+  it("collapses the slash left when a directory level is removed", function()
+    assert.equals("a/s.toml", backend.summary_path("a/{x => }/s.toml"))
   end)
 end)
 
