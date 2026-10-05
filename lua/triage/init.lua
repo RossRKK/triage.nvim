@@ -464,21 +464,20 @@ function M.folder(abs)
 end
 
 --- The review verdict implied by the current triage state, as a GitHub review
---- event. This is the same rollup the tree uses, taken all the way to the repo
---- root: the highest-priority status across every changed file wins, in the same
---- attention order (revised > changed > rejected > approved). Read as a verdict
---- that means: while any file is still untriaged ("changed") or awaiting a
---- re-review ("revised"), you're mid-review, so it's COMMENT — a batch of notes
---- with no standing verdict; only once nothing's pending does a live rejection
---- surface as REQUEST_CHANGES, or an all-approved tree as APPROVE. So an early,
---- partial submit never renders a premature verdict. nil when nothing's changed.
---- Scoped to one repo (default: the cwd's), since the status table now holds
---- every reviewed repo; with no resolvable root, every entry counts.
+--- event, across every changed file. Not the tree's attention order: a
+--- rejection is a standing verdict however much is left to look at, so any live
+--- one makes it REQUEST_CHANGES, even mid-review. Otherwise, while any file is
+--- still untriaged ("changed") or awaiting a re-review ("revised"), it's COMMENT
+--- -- a batch of notes with no standing verdict -- so an early, partial submit
+--- never renders a premature approval. APPROVE once everything is approved; nil
+--- when nothing's changed. Scoped to one repo (default: the cwd's), since the
+--- status table holds every reviewed repo; with no resolvable root, every entry
+--- counts.
 ---@param root string? repo root to scope to
 ---@return "APPROVE"|"REQUEST_CHANGES"|"COMMENT"|nil
 function M.verdict(root)
   root = root or cwd_root()
-  local priority = { approved = 1, rejected = 2, changed = 3, revised = 4 }
+  local priority = { approved = 1, changed = 2, revised = 3, rejected = 4 }
   local worst
   for path, st in pairs(M.status_by_path) do
     if (not root or under(path, root)) and (not worst or priority[st] > priority[worst]) then

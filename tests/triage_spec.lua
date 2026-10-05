@@ -33,10 +33,10 @@ describe("triage.verdict", function()
     assert.equals("REQUEST_CHANGES", verdict_of({ a = "approved", b = "rejected" }))
   end)
 
-  -- The mid-review property: while anything is still untriaged, a rejection does
-  -- NOT harden into a blocking verdict -- an early submit goes out as COMMENT.
-  it("stays COMMENT while an untriaged file outranks a rejection", function()
-    assert.equals("COMMENT", verdict_of({ a = "changed", b = "rejected" }))
+  -- A rejection is a standing verdict: it blocks even while files are still
+  -- untriaged, rather than softening into a COMMENT until the review is done.
+  it("requests changes when a rejection sits among untriaged files", function()
+    assert.equals("REQUEST_CHANGES", verdict_of({ a = "changed", b = "rejected" }))
   end)
 
   it("stays COMMENT while an untriaged file sits among approvals", function()
@@ -47,8 +47,8 @@ describe("triage.verdict", function()
     assert.equals("COMMENT", verdict_of({ a = "revised" }))
   end)
 
-  it("ranks revised above a rejection", function()
-    assert.equals("COMMENT", verdict_of({ a = "revised", b = "rejected" }))
+  it("ranks a rejection above revised", function()
+    assert.equals("REQUEST_CHANGES", verdict_of({ a = "revised", b = "rejected" }))
   end)
 
   -- Reviews are per repo: another repo's pending files must not soften this
