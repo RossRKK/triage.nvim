@@ -101,6 +101,85 @@ function M.default_base(root, configured)
   return nil
 end
 
+--- A branch name as a ref, preferring the remote's copy: a PR's base is what
+--- GitHub diffs against, and a local branch of the same name may be stale or
+--- carry unpushed work.
+---@param root string
+---@param name string branch name without a remote, e.g. "feat/x"
+---@return string?
+function M.branch_ref(root, name)
+  for _, candidate in ipairs({ "origin/" .. name, name }) do
+    if #git(root, { "rev-parse", "--verify", "--quiet", candidate }) > 0 then
+      return candidate
+    end
+  end
+  return nil
+end
+
+--- The branch HEAD's branch is stacked on: the nearest other branch on HEAD's
+--- first-parent line that the default branch doesn't already contain. One `git
+--- log` walk, bounded by `--not default`, so a repo with thousands of remote
+--- branches costs the same as one with three, and old feature branches merged
+--- into the default branch can't be picked (they're below the fork point).
+---
+--- Skipped: HEAD's own branch, its upstream and origin copy (they sit on the
+--- branch's own commits whenever it has unpushed work), and the default branch
+--- under either name (a stale local `master` would otherwise beat origin/HEAD).
+--- Decorations on HEAD itself are skipped too: a branch at the same commit is a
+--- sibling or a child just created, not a parent.
+---
+--- When a commit carries both a local branch and its origin copy, the local
+--- one wins -- that is the branch being stacked on, unpushed commits included.
+---@param root string
+---@param default string? the default base, to bound the walk
+---@return string?
+function M.parent_branch(root, default)
+  local own = git(root, { "symbolic-ref", "--quiet", "--short", "HEAD" })[1]
+  local upstream = git(root, { "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}" })[1]
+  local skip = {}
+  local function skip_both(name)
+    if name and name ~= "" then
+      local bare = name:gsub("^origin/", "")
+      skip[bare], skip["origin/" .. bare], skip[name] = true, true, true
+    end
+  end
+  -- Not a loop over { own, upstream, default }: any of them may be nil, and
+  -- ipairs stops at the first hole.
+  skip_both(own)
+  skip_both(upstream)
+  skip_both(default)
+  local args = {
+    "log",
+    "--first-parent",
+    "--format=%D",
+    "--decorate-refs=refs/heads/",
+    "--decorate-refs=refs/remotes/origin/",
+    "--decorate-refs-exclude=refs/remotes/origin/HEAD",
+    "-n",
+    "1000",
+    "HEAD~1",
+  }
+  if default then
+    vim.list_extend(args, { "--not", default })
+  end
+  for _, line in ipairs(git(root, args)) do
+    local remote
+    for name in vim.gsplit(line, ", ", { plain = true }) do
+      name = name:gsub("^HEAD %-> ", "")
+      if name ~= "" and not skip[name] then
+        if not name:match("^origin/") then
+          return name
+        end
+        remote = remote or name
+      end
+    end
+    if remote then
+      return remote
+    end
+  end
+  return nil
+end
+
 --- Where HEAD forked from `branch`: the sha the gutter diffs against. See the
 --- jj backend's fork_point for why the tip is wrong once the branch moves on.
 --- Falls back to `branch` itself when git cannot find a merge base (unrelated

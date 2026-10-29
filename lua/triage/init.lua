@@ -60,8 +60,13 @@ M.enabled_roots = {}
 M.reviews = {}
 
 -- User-chosen branches to review against, overriding auto-detection: normalized
--- root -> ref. Absent = auto (origin/HEAD, else main/master). <leader>rb.
+-- root -> ref. Absent = auto (see review_branch). <leader>rb.
 M.target_override = {}
+
+-- Why each active review's base was picked: normalized root -> label ("set",
+-- "stack", or opts.resolve_base's own, e.g. "#412"). Absent for the default
+-- branch, which needs no explaining. Shown in the statusline.
+M.base_labels = {}
 
 local uv = vim.uv or vim.loop
 
@@ -115,13 +120,37 @@ function M.is_enabled(root)
   return (root and M.enabled_roots[root]) == true
 end
 
---- The branch the current branch is reviewed against: the user's override if set
---- (<leader>rb / :ReviewBase), else the auto-detected default branch.
+--- The branch the current branch is reviewed against, and why it was picked.
+--- First match wins:
+---   1. the user's override (<leader>rb / :ReviewBase)            -> "set"
+---   2. opts.resolve_base -- e.g. the branch's PR base             -> its label
+---   3. the branch this one is stacked on (backend.parent_branch)  -> "stack"
+---   4. the default branch                                         -> nil
+--- A stacked branch reviewed against the default branch shows every parent's
+--- changes as its own, so 2 and 3 come before the default.
 ---@param root string normalized
----@return string?
+---@return string? base, string? label
 local function review_branch(root)
-  return M.target_override[root] or be(root).default_base(root, M.opts.base)
+  if M.target_override[root] then
+    return M.target_override[root], "set"
+  end
+  local backend = be(root)
+  if M.opts.resolve_base then
+    local branch = backend.head(root)
+    local name, label = M.opts.resolve_base(root, branch)
+    local ref = name and name ~= "" and backend.branch_ref(root, name)
+    if ref then
+      return ref, label
+    end
+  end
+  local default = backend.default_base(root, M.opts.base)
+  local parent = backend.parent_branch(root, default)
+  if parent then
+    return parent, "stack"
+  end
+  return default, nil
 end
+M._review_branch = review_branch
 
 -- ---------------------------------------------------------------------------
 -- Decision persistence (per repo, under stdpath("state")/review/).
@@ -233,6 +262,7 @@ local function deactivate(root)
     end
   end
   M.reviews[root] = nil
+  M.base_labels[root] = nil
   -- The inline diff (M.toggle_diff) borrows the base while it is on; a refresh
   -- that finds review mode off must not yank it back to HEAD under the view.
   -- Review mode is off now, so that is what the view restores when it closes.
@@ -335,7 +365,7 @@ local function do_refresh(mygen)
     return
   end
 
-  local branch = review_branch(nroot)
+  local branch, label = review_branch(nroot)
   local changed = branch and changed_files(root, branch)
   if stale() then
     return
@@ -393,6 +423,7 @@ local function do_refresh(mygen)
     M.folder_status[path] = st
   end
   M.reviews[nroot] = branch
+  M.base_labels[nroot] = label
   -- Drop decisions for files that no longer differ (e.g. after a rebase).
   if next(decisions) then
     save_decisions(root, still)
@@ -510,7 +541,8 @@ function M.statusline()
   -- change, so a merge icon reads truer than a plain branch. Bytes, not the raw
   -- glyph, so it can't be lost when the file is edited.
   local merge = "\xef\x90\x99"
-  return vim.trim(merge .. " " .. base)
+  local label = M.base_labels[root]
+  return vim.trim(merge .. " " .. base .. (label and (" · " .. label) or ""))
 end
 
 ---@class TriageReport
@@ -878,6 +910,10 @@ local default_keys = {
 --- Configure and activate triage.nvim.
 ---@param opts? { base?: string, on_toggle?: fun(enabled: boolean, root: string), keys?: table<string, string|false> }
 ---   base       default review base (e.g. "develop"); nil auto-detects origin/HEAD → main/master.
+---   resolve_base fun(root, branch): name?, label? -- a branch to review `branch`
+---              against before stack inference, e.g. its PR's base. `name` is a
+---              bare branch name (the backend prefers the origin copy); `label`
+---              says why, in the statusline. Runs in the refresh coroutine.
 ---   on_toggle  fired by the toggle action with the new enabled state and the
 ---              repo root it applies to — wire a
 ---              companion (e.g. nitpick's comments) to follow the same switch.

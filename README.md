@@ -29,6 +29,12 @@ Pairs with [nitpick.nvim][] (inline GitHub PR comments), but stands alone.
 | Key         | Type                    | Description                                              |
 | ----------- | ----------------------- | ------------------------------------------------------- |
 | `on_toggle` | `fun(on: boolean, root: string)` | Called when review mode is toggled, with the repo root it applies to. Wire a companion (e.g. nitpick) here. |
+| `resolve_base` | `fun(root: string, branch: string?): string?, string?` | A branch to review against before stack inference -- e.g. the branch's PR base -- and a short label for the statusline. Bare branch name; `origin/` is preferred when it exists. Runs in the refresh coroutine, so keep it a cache read. |
+| `base`      | `string?`               | Default branch override (e.g. `"develop"`); nil auto-detects `origin/HEAD`, then main/master. |
+
+The review base is the first of: the `:ReviewBase` override, `resolve_base`, the
+branch this one is stacked on (the nearest other branch on HEAD's first-parent
+line that the default branch doesn't contain; git only), and the default branch.
 
 The neo-tree glyph is registered as the `triage_status` component
 (`require("triage.adapter").status_component`); add it to your neo-tree

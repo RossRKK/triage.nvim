@@ -186,6 +186,28 @@ function M.default_base(root, configured)
   return count(root, "present(trunk())") > 0 and "trunk()" or nil
 end
 
+--- A branch name as a revset, preferring the remote's bookmark (see the git
+--- backend's branch_ref).
+---@param root string
+---@param name string
+---@return string?
+function M.branch_ref(root, name)
+  for _, candidate in ipairs({ name .. "@origin", name }) do
+    if count(root, "present(" .. candidate .. ")") > 0 then
+      return candidate
+    end
+  end
+  return nil
+end
+
+--- No stack inference under jj: its bookmarks don't name "the change's branch"
+--- the way git's HEAD does, so there's nothing reliable to skip. A PR's base
+--- (opts.resolve_base) still applies.
+---@return nil
+function M.parent_branch()
+  return nil
+end
+
 --- Where this change forked from `base`, as a revset: the base the gutter must
 --- diff against. The review compares master with the result of merging the
 --- change into it, so only the change's own lines count. The gutter can only
