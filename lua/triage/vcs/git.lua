@@ -192,6 +192,28 @@ function M.fork_point(root, branch)
   return (sha and sha:match("^%x+$")) and sha or branch
 end
 
+--- The commits on HEAD that `base` lacks, newest first: the commits a review
+--- base can be moved up to. "Pushed" is any remote having it, not just the
+--- upstream, so a commit shared with a parent branch counts.
+---@param root string
+---@param base string
+---@return TriageCommit[]
+function M.commits(root, base)
+  local fork = M.fork_point(root, base)
+  local unpushed = {}
+  for _, sha in ipairs(git(root, { "rev-list", "HEAD", "^" .. fork, "--not", "--remotes" })) do
+    unpushed[sha] = true
+  end
+  local commits = {}
+  for _, line in ipairs(git(root, { "log", "--format=%H%x09%h%x09%s", "HEAD", "^" .. fork })) do
+    local sha, short, subject = line:match("^(%x+)\t(%x+)\t(.*)$")
+    if sha then
+      commits[#commits + 1] = { rev = short, subject = subject, pushed = not unpushed[sha] }
+    end
+  end
+  return commits
+end
+
 --- Resolve a ref to its commit sha (cheap; used for cache keys).
 ---@param root string
 ---@param ref string

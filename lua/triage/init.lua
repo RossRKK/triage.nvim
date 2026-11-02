@@ -129,20 +129,10 @@ function M.is_enabled(root)
   return (root and M.enabled_roots[root]) == true
 end
 
---- The branch the current branch is reviewed against, and why it was picked.
---- First match wins:
----   1. the user's override (<leader>rb / :ReviewBase)            -> "set"
----   2. opts.resolve_base -- e.g. the branch's PR base             -> its label
----   3. the branch this one is stacked on (backend.parent_branch)  -> "stack"
----   4. the default branch                                         -> nil
---- A stacked branch reviewed against the default branch shows every parent's
---- changes as its own, so 2 and 3 come before the default.
+--- The review base when the user hasn't set one: 2-4 of review_branch.
 ---@param root string normalized
 ---@return string? base, string? label
-local function review_branch(root)
-  if M.target_override[root] then
-    return M.target_override[root], "set"
-  end
+local function auto_branch(root)
   local backend = be(root)
   if M.opts.resolve_base then
     local branch = backend.head(root)
@@ -158,6 +148,23 @@ local function review_branch(root)
     return parent, "stack"
   end
   return default, nil
+end
+
+--- The branch the current branch is reviewed against, and why it was picked.
+--- First match wins:
+---   1. the user's override (<leader>rb / :ReviewBase)            -> "set"
+---   2. opts.resolve_base -- e.g. the branch's PR base             -> its label
+---   3. the branch this one is stacked on (backend.parent_branch)  -> "stack"
+---   4. the default branch                                         -> nil
+--- A stacked branch reviewed against the default branch shows every parent's
+--- changes as its own, so 2 and 3 come before the default.
+---@param root string normalized
+---@return string? base, string? label
+local function review_branch(root)
+  if M.target_override[root] then
+    return M.target_override[root], "set"
+  end
+  return auto_branch(root)
 end
 M._review_branch = review_branch
 
@@ -480,6 +487,54 @@ function M.set_target(ref)
     M.target_override[vim.fs.normalize(root)] = ref
     vim.notify("review target: " .. (ref or "auto"))
     M.refresh()
+  end)()
+end
+
+---@class TriageBaseChoice
+---@field ref string? the base to set; nil goes back to auto-detection
+---@field text string
+
+--- The picker's rows, in log order: the branch's commits newest first, then the
+--- auto-detected base they sit on.
+---@param auto string the auto-detected base
+---@param label string? why it was picked (see review_branch)
+---@param commits TriageCommit[]
+---@return TriageBaseChoice[]
+function M._base_choices(auto, label, commits)
+  local choices = {}
+  for _, c in ipairs(commits) do
+    local where = c.pushed and "pushed" or "local "
+    choices[#choices + 1] = { ref = c.rev, text = where .. " " .. c.rev .. "  " .. c.subject }
+  end
+  choices[#choices + 1] = { text = "auto   " .. auto .. (label and (" · " .. label) or "") }
+  return choices
+end
+
+--- Pick the review base from the commits between HEAD and the auto-detected
+--- base, so a review can skip commits already looked at.
+function M.pick_target()
+  coroutine.wrap(function()
+    local root = repo_root()
+    if not root then
+      return vim.notify("review: not in a git repo", vim.log.levels.WARN)
+    end
+    local nroot = vim.fs.normalize(root)
+    local auto, label = auto_branch(nroot)
+    if not auto then
+      return vim.notify("review: no default branch to start from", vim.log.levels.WARN)
+    end
+    local choices = M._base_choices(auto, label, be(nroot).commits(nroot, auto))
+    local current = M.target_override[nroot]
+    vim.ui.select(choices, {
+      prompt = "Review base" .. (current and (" (now " .. current .. ")") or "") .. ": ",
+      format_item = function(choice)
+        return choice.text
+      end,
+    }, function(choice)
+      if choice then
+        M.set_target(choice.ref)
+      end
+    end)
   end)()
 end
 
@@ -910,7 +965,7 @@ local default_keys = {
   reject = "<leader>rj", -- mark file/folder rejected
   unmark = "<leader>ru", -- clear the decision (untriage)
   toggle = "<leader>rt", -- toggle review mode
-  base = "<leader>rb", -- set the review target branch
+  base = "<leader>rb", -- pick the review base from the branch's commits
   diff = "<leader>rd", -- toggle the inline diff view
   refresh = "<leader>rR", -- recompute review status
 }
@@ -986,6 +1041,11 @@ function M.setup(opts)
     { desc = "Recompute branch review status" }
   )
   vim.api.nvim_create_user_command("ReviewToggle", M.toggle, { desc = "Toggle branch review mode" })
+  vim.api.nvim_create_user_command(
+    "ReviewPickBase",
+    M.pick_target,
+    { desc = "Pick the review base from the branch's commits" }
+  )
   -- Complete :ReviewBase with local and remote branch names matching the prefix.
   local function complete_ref(arg)
     local root = require("triage.gitsigns").buf_root(0) or cwd_root()
@@ -1048,17 +1108,7 @@ function M.setup(opts)
       "Review: clear decision (untriage)",
     },
     toggle = { M.toggle, "Review: toggle review mode" },
-    base = {
-      function()
-        local prev = M.target_override[cwd_root() or ""] or ""
-        vim.ui.input({ prompt = "Review target (empty = auto): ", default = prev }, function(input)
-          if input ~= nil then
-            M.set_target(input)
-          end
-        end)
-      end,
-      "Review: set target branch",
-    },
+    base = { M.pick_target, "Review: pick base commit" },
     diff = { M.toggle_diff, "Review: toggle inline diff view" },
     refresh = { M.refresh, "Review: refresh status" },
   }

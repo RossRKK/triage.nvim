@@ -10,6 +10,11 @@ local M = {}
 
 ---@alias TriageBackend table the module in vcs/git.lua or vcs/jj.lua
 
+---@class TriageCommit
+---@field rev string short id the backend resolves, usable as a review base
+---@field subject string
+---@field pushed boolean a remote has it
+
 --- The backend for a directory, or nil if it is under neither VCS.
 ---@param dir string
 ---@return TriageBackend?

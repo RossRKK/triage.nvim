@@ -36,6 +36,12 @@ The review base is the first of: the `:ReviewBase` override, `resolve_base`, the
 branch this one is stacked on (the nearest other branch on HEAD's first-parent
 line that the default branch doesn't contain; git only), and the default branch.
 
+`<leader>rb` (`:ReviewPickBase`) picks the override from the commits between HEAD
+and that auto-detected base, each marked `pushed` (a remote has it) or `local`,
+so a review can start after the commits already looked at. The last row, `auto`,
+clears the override. Under jj a pick is a change id, so it survives a rebase; a
+git pick is a sha and goes stale if the branch is rebased under it.
+
 The neo-tree glyph is registered as the `triage_status` component
 (`require("triage.adapter").status_component`); add it to your neo-tree
 filesystem renderers. See the source for the full command/keymap surface.

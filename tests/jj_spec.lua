@@ -309,3 +309,34 @@ describe("triage.vcs.jj.dirs", function()
     assert.truthy(stat and stat.type == "directory", "op heads dir should exist")
   end)
 end)
+
+describe("triage.vcs.jj.commits", function()
+  if not has_jj then
+    pending("jj not installed")
+    return
+  end
+  local backend = require("triage.vcs.jj")
+
+  it("lists @ down to the fork point, newest first, marking what a remote has", function()
+    local root, jj = diverged_repo()
+    jj("commit", "-m", "C")
+    jj("describe", "-m", "D")
+    local remote = vim.fn.tempname()
+    vim.fn.mkdir(remote, "p")
+    vim.system({ "git", "init", "--bare", "-q", remote }):wait()
+    jj("git", "remote", "add", "origin", remote)
+    jj("bookmark", "create", "rkk/feat", "-r", "@-")
+    jj("git", "push", "--bookmark", "rkk/feat", "--allow-new")
+    local function change(rev)
+      return vim.trim(jj("log", "--no-graph", "-r", rev, "-T", "change_id.shortest(8)"))
+    end
+
+    local got = run(function()
+      return backend.commits(root, "master")
+    end)
+    assert.same({
+      { rev = change("@"), subject = "D", pushed = false },
+      { rev = change("@-"), subject = "C", pushed = true },
+    }, got)
+  end)
+end)

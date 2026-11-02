@@ -132,3 +132,21 @@ describe("triage.is_enabled", function()
     assert.is_false(triage.is_enabled())
   end)
 end)
+
+describe("triage._base_choices", function()
+  it("lists commits in log order, then the auto base with its label", function()
+    local got = triage._base_choices("origin/main", "#412", {
+      { rev = "bbb", subject = "second", pushed = false },
+      { rev = "aaa", subject = "first", pushed = true },
+    })
+    assert.same({
+      { ref = "bbb", text = "local  bbb  second" },
+      { ref = "aaa", text = "pushed aaa  first" },
+      { text = "auto   origin/main · #412" },
+    }, got)
+  end)
+
+  it("leaves the auto row unlabelled for the default branch", function()
+    assert.same({ { text = "auto   origin/main" } }, triage._base_choices("origin/main", nil, {}))
+  end)
+end)

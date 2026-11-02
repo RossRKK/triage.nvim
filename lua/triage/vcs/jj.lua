@@ -226,6 +226,40 @@ function M.fork_point(root, base)
   return "fork_point(" .. base .. " | @)"
 end
 
+--- The changes on @ that `base` lacks, newest first: the changes a review base
+--- can be moved up to. Named by change id, so a pick survives a rebase.
+---@param root string
+---@param base string revset
+---@return TriageCommit[]
+function M.commits(root, base)
+  local range = M.fork_point(root, base) .. "..@"
+  local pushed = {}
+  local ids = jj(
+    root,
+    {
+      "log",
+      "--no-graph",
+      "-r",
+      "(" .. range .. ") & ::remote_bookmarks()",
+      "-T",
+      'commit_id ++ "\n"',
+    }
+  )
+  for _, id in ipairs(ids) do
+    pushed[id] = true
+  end
+  local template =
+    'commit_id ++ "\t" ++ change_id.shortest(8) ++ "\t" ++ description.first_line() ++ "\n"'
+  local commits = {}
+  for _, line in ipairs(jj(root, { "log", "--no-graph", "-r", range, "-T", template })) do
+    local id, change, subject = line:match("^(%x+)\t(%S+)\t(.*)$")
+    if id then
+      commits[#commits + 1] = { rev = change, subject = subject, pushed = pushed[id] == true }
+    end
+  end
+  return commits
+end
+
 --- Resolve a revset to a stable id (used only as a cache key).
 ---@param root string
 ---@param ref string

@@ -301,3 +301,47 @@ describe("triage review base resolution", function()
     assert.is_nil(label)
   end)
 end)
+
+describe("triage.vcs.git.commits", function()
+  if not has_git then
+    pending("git not installed")
+    return
+  end
+  local backend = require("triage.vcs.git")
+  local root, git, commit
+
+  before_each(function()
+    root, git, commit = stack_repo()
+  end)
+
+  after_each(function()
+    vim.fn.delete(root, "rf")
+  end)
+
+  local function commits(base)
+    return run(function()
+      return backend.commits(root, base)
+    end)
+  end
+
+  it("lists HEAD down to the fork point, newest first, marking what a remote has", function()
+    git("checkout", "-q", "-b", "topic")
+    local pushed = commit()
+    commit()
+    git("update-ref", "refs/remotes/origin/topic", pushed)
+    -- master moving on must not pull its commits into the list.
+    git("checkout", "-q", "master")
+    commit()
+    git("checkout", "-q", "topic")
+
+    local got = commits("master")
+    assert.same({
+      { rev = git("rev-parse", "--short", "HEAD"), subject = "c3", pushed = false },
+      { rev = git("rev-parse", "--short", pushed), subject = "c2", pushed = true },
+    }, got)
+  end)
+
+  it("is empty when HEAD is the base", function()
+    assert.same({}, commits("master"))
+  end)
+end)
