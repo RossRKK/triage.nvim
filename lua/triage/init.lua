@@ -469,7 +469,8 @@ end
 --- the ref resolves before adopting it, then refreshes so the file list, signs
 --- and inline diff all move to the new base.
 ---@param ref string? branch/commit-ish, or nil/"" to clear
-function M.set_target(ref)
+---@param root string? the repo it applies to; nil = the cwd's
+function M.set_target(ref, root)
   if ref then
     ref = vim.trim(ref)
     if ref == "" then
@@ -477,7 +478,7 @@ function M.set_target(ref)
     end
   end
   coroutine.wrap(function()
-    local root = repo_root()
+    root = root or repo_root()
     if not root then
       return vim.notify("review: not in a git repo", vim.log.levels.WARN)
     end
