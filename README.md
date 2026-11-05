@@ -36,11 +36,25 @@ The review base is the first of: the `:ReviewBase` override, `resolve_base`, the
 branch this one is stacked on (the nearest other branch on HEAD's first-parent
 line that the default branch doesn't contain; git only), and the default branch.
 
-`<leader>rb` (`:ReviewPickBase`) picks the override from the commits between HEAD
-and that auto-detected base, each marked `pushed` (a remote has it) or `local`,
-so a review can start after the commits already looked at. The last row, `auto`,
-clears the override. Under jj a pick is a change id, so it survives a rebase; a
-git pick is a sha and goes stale if the branch is rebased under it.
+`<leader>rb` (`:ReviewPickBase`) reviews a range of the branch's commits, listed
+from the tip down to that auto-detected base, each marked `pushed` (a remote has
+it) or `local`. Pick the top ("review up to"), then the bottom ("review from"):
+the top is checked out and the bottom becomes the override, so the files, signs
+and diff are that range's alone. The bottom list ends with `auto`, the
+auto-detected base. Picking the tip as the top goes back to the branch, so the
+first row and `auto` is the whole branch again.
+
+Checking out the top refuses over uncommitted git changes. Under jj it is a
+`jj new` on the top, so the reviewed change can't be amended by accident; going
+back edits the change you were on (or starts a new one on its parent if it was
+empty). Under jj a pick is a change id, so it survives a rebase; a git pick is a
+sha and goes stale if the branch is rebased under it.
+
+`<leader>rA` (`:ReviewApproveCommits`) marks the commits under review (the base
+up to HEAD) approved, and the picker ticks them ✓ from then on. Approval is keyed
+by `git patch-id`, as `git cherry` matches commits, so it survives a rebase that
+leaves a commit's diff alone and lapses once the diff changes. A commit with no
+diff can't be approved.
 
 The neo-tree glyph is registered as the `triage_status` component
 (`require("triage.adapter").status_component`); add it to your neo-tree

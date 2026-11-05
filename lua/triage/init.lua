@@ -63,6 +63,12 @@ M.reviews = {}
 -- root -> ref. Absent = auto (see review_branch). <leader>rb.
 M.target_override = {}
 
+-- Reviews whose range checked out a commit below the branch tip: normalized
+-- root -> { tip: TriageTip, base: string, label: string? }, the tip to return
+-- to and the auto base the range was picked from (no longer derivable once
+-- HEAD has left the branch). Absent while the tip is checked out. <leader>rb.
+M.away = {}
+
 -- Why each active review's base was picked: normalized root -> label ("set",
 -- "stack", or opts.resolve_base's own, e.g. "#412"). Absent for the default
 -- branch, which needs no explaining. Shown in the statusline.
@@ -247,6 +253,38 @@ local function save_decisions(root, decisions)
   end
   table.sort(lines)
   vim.fn.writefile(lines, decisions_file(root))
+end
+
+-- Approved commits (per repo, beside the decisions): one patch id per line.
+-- Keyed by patch id rather than commit id, so an approval survives a rebase
+-- that leaves the commit's diff alone and lapses when the diff changes.
+
+---@param root string
+---@return string
+local function approved_file(root)
+  return (decisions_file(root):gsub("%.triage$", ".approved"))
+end
+
+--- Patch ids of the commits marked approved, as a set.
+---@param root string
+---@return table<string, true>
+local function load_approved(root)
+  local approved = {}
+  local path = approved_file(root)
+  if vim.fn.filereadable(path) == 1 then
+    for _, id in ipairs(vim.fn.readfile(path)) do
+      approved[id] = true
+    end
+  end
+  return approved
+end
+
+---@param root string
+---@param approved table<string, true>
+local function save_approved(root, approved)
+  local ids = vim.tbl_keys(approved)
+  table.sort(ids)
+  vim.fn.writefile(ids, approved_file(root))
 end
 
 -- ---------------------------------------------------------------------------
@@ -495,24 +533,64 @@ end
 ---@field ref string? the base to set; nil goes back to auto-detection
 ---@field text string
 
---- The picker's rows, in log order: the branch's commits newest first, then the
---- auto-detected base they sit on.
----@param auto string the auto-detected base
----@param label string? why it was picked (see review_branch)
+--- One picker row per commit, in log order: approved, pushed or local, id, subject.
 ---@param commits TriageCommit[]
+---@param approved table<string, true> patch ids
 ---@return TriageBaseChoice[]
-function M._base_choices(auto, label, commits)
+function M._commit_choices(commits, approved)
   local choices = {}
   for _, c in ipairs(commits) do
+    local mark = (c.patch_id and approved[c.patch_id]) and M.icons.approved.text or " "
     local where = c.pushed and "pushed" or "local "
-    choices[#choices + 1] = { ref = c.rev, text = where .. " " .. c.rev .. "  " .. c.subject }
+    choices[#choices + 1] =
+      { ref = c.rev, text = mark .. " " .. where .. " " .. c.rev .. "  " .. c.subject }
   end
-  choices[#choices + 1] = { text = "auto   " .. auto .. (label and (" · " .. label) or "") }
   return choices
 end
 
---- Pick the review base from the commits between HEAD and the auto-detected
---- base, so a review can skip commits already looked at.
+--- The "review from" rows: the commits below the range's top, then the
+--- auto-detected base they sit on.
+---@param auto string the auto-detected base
+---@param label string? why it was picked (see review_branch)
+---@param below TriageCommit[] commits under the chosen top, newest first
+---@param approved table<string, true> patch ids
+---@return TriageBaseChoice[]
+function M._base_choices(auto, label, below, approved)
+  local choices = M._commit_choices(below, approved)
+  choices[#choices + 1] = { text = "  auto   " .. auto .. (label and (" · " .. label) or "") }
+  return choices
+end
+
+--- vim.ui.select from inside a coroutine: the chosen item, or nil. Covers both a
+--- picker that answers later and the builtin one, which answers before
+--- returning (resuming a running coroutine would error).
+---@param choices TriageBaseChoice[]
+---@param prompt string
+---@return TriageBaseChoice? choice, integer? index
+local function select(choices, prompt)
+  local co = coroutine.running()
+  local answered, answer, index = false, nil, nil
+  vim.ui.select(choices, {
+    prompt = prompt,
+    format_item = function(choice)
+      return choice.text
+    end,
+  }, function(choice, idx)
+    answered, answer, index = true, choice, idx
+    if coroutine.status(co) == "suspended" then
+      coroutine.resume(co, choice, idx)
+    end
+  end)
+  if answered then
+    return answer, index
+  end
+  return coroutine.yield()
+end
+
+--- Pick a range of the branch's commits to review: the top is checked out and
+--- the bottom becomes the review base, so the files, signs and diff are that
+--- range's alone. Picking the branch tip as the top goes back to it. The
+--- commits are listed down to the auto-detected base, ✓ on approved ones.
 function M.pick_target()
   coroutine.wrap(function()
     local root = repo_root()
@@ -520,22 +598,82 @@ function M.pick_target()
       return vim.notify("review: not in a git repo", vim.log.levels.WARN)
     end
     local nroot = vim.fs.normalize(root)
-    local auto, label = auto_branch(nroot)
+    local backend = be(nroot)
+    local away = M.away[nroot]
+    local auto, label
+    if away then
+      auto, label = away.base, away.label
+    else
+      auto, label = auto_branch(nroot)
+    end
     if not auto then
       return vim.notify("review: no default branch to start from", vim.log.levels.WARN)
     end
-    local choices = M._base_choices(auto, label, be(nroot).commits(nroot, auto))
-    local current = M.target_override[nroot]
-    vim.ui.select(choices, {
-      prompt = "Review base" .. (current and (" (now " .. current .. ")") or "") .. ": ",
-      format_item = function(choice)
-        return choice.text
-      end,
-    }, function(choice)
-      if choice then
-        M.set_target(choice.ref)
+    local commits = backend.commits(nroot, auto, away and away.tip.rev)
+    if #commits == 0 then
+      return vim.notify("review: no commits on top of " .. auto, vim.log.levels.INFO)
+    end
+    local approved = load_approved(nroot)
+
+    local _, top = select(M._commit_choices(commits, approved), "Review up to: ")
+    if not top then
+      return
+    end
+    local base = select(
+      M._base_choices(auto, label, vim.list_slice(commits, top + 1), approved),
+      "Review from: "
+    )
+    if not base then
+      return
+    end
+
+    local ok, err = true, nil
+    if top > 1 then
+      local tip = away and away.tip or backend.tip(nroot)
+      ok, err = backend.checkout(nroot, commits[top].rev)
+      if ok then
+        M.away[nroot] = { tip = tip, base = auto, label = label }
       end
-    end)
+    elseif away then
+      ok, err = backend.restore(nroot, away.tip)
+      if ok then
+        M.away[nroot] = nil
+      end
+    end
+    if not ok then
+      return vim.notify("review: " .. err, vim.log.levels.ERROR)
+    end
+    -- The checkout rewrote files under any open buffers.
+    vim.cmd.checktime()
+    -- Away from the tip, "auto" must stay the base the range was listed from:
+    -- auto-detection from a detached HEAD would pick something else.
+    M.set_target(base.ref or (M.away[nroot] and auto) or nil, nroot)
+  end)()
+end
+
+--- Mark every commit under review (the review base up to HEAD) approved, so the
+--- picker shows them ✓ from now on.
+function M.approve_commits()
+  coroutine.wrap(function()
+    local root = repo_root()
+    if not root then
+      return vim.notify("review: not in a git repo", vim.log.levels.WARN)
+    end
+    local nroot = vim.fs.normalize(root)
+    local base = review_branch(nroot)
+    if not base then
+      return vim.notify("review: no review base", vim.log.levels.WARN)
+    end
+    local approved = load_approved(nroot)
+    local count = 0
+    for _, c in ipairs(be(nroot).commits(nroot, base)) do
+      if c.patch_id and not approved[c.patch_id] then
+        approved[c.patch_id] = true
+        count = count + 1
+      end
+    end
+    save_approved(nroot, approved)
+    vim.notify(("review: approved %d commit(s) since %s"):format(count, base))
   end)()
 end
 
@@ -966,7 +1104,8 @@ local default_keys = {
   reject = "<leader>rj", -- mark file/folder rejected
   unmark = "<leader>ru", -- clear the decision (untriage)
   toggle = "<leader>rt", -- toggle review mode
-  base = "<leader>rb", -- pick the review base from the branch's commits
+  base = "<leader>rb", -- pick the range of the branch's commits to review
+  approve_commits = "<leader>rA", -- mark the commits under review approved
   diff = "<leader>rd", -- toggle the inline diff view
   refresh = "<leader>rR", -- recompute review status
 }
@@ -1045,7 +1184,12 @@ function M.setup(opts)
   vim.api.nvim_create_user_command(
     "ReviewPickBase",
     M.pick_target,
-    { desc = "Pick the review base from the branch's commits" }
+    { desc = "Pick the range of the branch's commits to review" }
+  )
+  vim.api.nvim_create_user_command(
+    "ReviewApproveCommits",
+    M.approve_commits,
+    { desc = "Mark the commits under review approved" }
   )
   -- Complete :ReviewBase with local and remote branch names matching the prefix.
   local function complete_ref(arg)
@@ -1109,7 +1253,8 @@ function M.setup(opts)
       "Review: clear decision (untriage)",
     },
     toggle = { M.toggle, "Review: toggle review mode" },
-    base = { M.pick_target, "Review: pick base commit" },
+    base = { M.pick_target, "Review: pick commit range" },
+    approve_commits = { M.approve_commits, "Review: approve commits under review" },
     diff = { M.toggle_diff, "Review: toggle inline diff view" },
     refresh = { M.refresh, "Review: refresh status" },
   }
