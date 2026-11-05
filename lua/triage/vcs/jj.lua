@@ -226,13 +226,36 @@ function M.fork_point(root, base)
   return "fork_point(" .. base .. " | @)"
 end
 
---- The changes on @ that `base` lacks, newest first: the changes a review base
---- can be moved up to. Named by change id, so a pick survives a rebase.
+--- Move @. Unlike the queries this snapshots: the working copy must be saved
+--- into its change before @ leaves it.
+---@param root string
+---@param args string[]
+---@return boolean ok, string? err
+local function move(root, args)
+  local cmd = { "jj", "--color=never", "--no-pager", "-R", root }
+  vim.list_extend(cmd, args)
+  local _, code = sh.sh(cmd, nil, root)
+  if code ~= 0 then
+    return false, "jj " .. table.concat(args, " ") .. " failed"
+  end
+  return true
+end
+
+--- The changes on `tip` (default @) that `base` lacks, newest first: the
+--- changes a review range can span. Named by change id, so a pick survives a
+--- rebase.
 ---@param root string
 ---@param base string revset
+---@param tip string? revset
 ---@return TriageCommit[]
-function M.commits(root, base)
-  local range = M.fork_point(root, base) .. "..@"
+function M.commits(root, base, tip)
+  tip = tip or "@"
+  local range = "fork_point(" .. base .. " | " .. tip .. ").." .. tip
+  -- patch-id reads the commit id line before each diff; jj's git backend ids
+  -- are git's, so a change patch-ids the same as its git commit.
+  local patch_ids = sh.patch_ids(
+    (jj(root, { "log", "--no-graph", "-r", range, "--git", "-T", 'commit_id ++ "\n"' }))
+  )
   local pushed = {}
   local ids = jj(
     root,
@@ -254,10 +277,39 @@ function M.commits(root, base)
   for _, line in ipairs(jj(root, { "log", "--no-graph", "-r", range, "-T", template })) do
     local id, change, subject = line:match("^(%x+)\t(%S+)\t(.*)$")
     if id then
-      commits[#commits + 1] = { rev = change, subject = subject, pushed = pushed[id] == true }
+      commits[#commits + 1] =
+        { rev = change, subject = subject, pushed = pushed[id] == true, patch_id = patch_ids[id] }
     end
   end
   return commits
+end
+
+--- Where @ is now, to come back to. An empty, undescribed @ is abandoned as
+--- soon as @ moves, so the way back is a fresh change on its parent; any other
+--- @ is still there to edit.
+---@param root string
+---@return TriageTip
+function M.tip(root)
+  local fresh = field(root, 'if(empty && description == "", "new", "edit")') == "new"
+  local rev = field(root, "change_id.shortest(8)", fresh and "@-" or "@")
+  return { rev = rev or "@", resume = fresh and "new" or "edit" }
+end
+
+--- Review the change as it stood at `rev`: a new change on top of it, so the
+--- reviewed change itself can't be amended by accident.
+---@param root string
+---@param rev string
+---@return boolean ok, string? err
+function M.checkout(root, rev)
+  return move(root, { "new", rev })
+end
+
+--- Go back to the tip a range left.
+---@param root string
+---@param tip TriageTip
+---@return boolean ok, string? err
+function M.restore(root, tip)
+  return move(root, { tip.resume, tip.rev })
 end
 
 --- Resolve a revset to a stable id (used only as a cache key).

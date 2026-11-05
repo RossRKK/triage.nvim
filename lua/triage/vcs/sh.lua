@@ -36,6 +36,28 @@ function M.sh(cmd, stdin, cwd)
   return coroutine.yield()
 end
 
+--- Patch ids (`git patch-id --stable`) for a stream of commits, each a commit
+--- id line followed by its diff: commit id -> patch id. A patch id names what a
+--- commit changes rather than where it sits, so it survives a rebase that
+--- leaves the diff alone -- what `git cherry` uses to spot applied commits.
+--- Commits with no diff (merges, empty changes) have none.
+---@param patches string[] lines of `git log -p --format=%H`-shaped output
+---@return table<string, string>
+function M.patch_ids(patches)
+  local ids = {}
+  if #patches == 0 then
+    return ids
+  end
+  local out = M.sh({ "git", "patch-id", "--stable" }, table.concat(patches, "\n") .. "\n")
+  for _, line in ipairs(out) do
+    local patch, commit = line:match("^(%x+) (%x+)$")
+    if patch then
+      ids[commit] = patch
+    end
+  end
+  return ids
+end
+
 --- Content hash of a working-tree file, computed in-process.
 ---
 --- The ledger records what a file looked like when it was triaged, so a decision

@@ -192,26 +192,72 @@ function M.fork_point(root, branch)
   return (sha and sha:match("^%x+$")) and sha or branch
 end
 
---- The commits on HEAD that `base` lacks, newest first: the commits a review
---- base can be moved up to. "Pushed" is any remote having it, not just the
---- upstream, so a commit shared with a parent branch counts.
+--- The commits on `tip` (default HEAD) that `base` lacks, newest first: the
+--- commits a review range can span. "Pushed" is any remote having it, not just
+--- the upstream, so a commit shared with a parent branch counts.
 ---@param root string
 ---@param base string
+---@param tip string?
 ---@return TriageCommit[]
-function M.commits(root, base)
-  local fork = M.fork_point(root, base)
+function M.commits(root, base, tip)
+  tip = tip or "HEAD"
+  local fork = git(root, { "merge-base", base, tip })[1]
+  fork = (fork and fork:match("^%x+$")) and fork or base
   local unpushed = {}
-  for _, sha in ipairs(git(root, { "rev-list", "HEAD", "^" .. fork, "--not", "--remotes" })) do
+  for _, sha in ipairs(git(root, { "rev-list", tip, "^" .. fork, "--not", "--remotes" })) do
     unpushed[sha] = true
   end
+  local patch_ids = sh.patch_ids(git(root, { "log", "-p", "--format=%H", tip, "^" .. fork }))
   local commits = {}
-  for _, line in ipairs(git(root, { "log", "--format=%H%x09%h%x09%s", "HEAD", "^" .. fork })) do
+  for _, line in ipairs(git(root, { "log", "--format=%H%x09%h%x09%s", tip, "^" .. fork })) do
     local sha, short, subject = line:match("^(%x+)\t(%x+)\t(.*)$")
     if sha then
-      commits[#commits + 1] = { rev = short, subject = subject, pushed = not unpushed[sha] }
+      commits[#commits + 1] =
+        { rev = short, subject = subject, pushed = not unpushed[sha], patch_id = patch_ids[sha] }
     end
   end
   return commits
+end
+
+--- Where HEAD is now, to come back to: the branch, or the commit when detached.
+---@param root string
+---@return TriageTip
+function M.tip(root)
+  local branch, head = M.head(root)
+  return { rev = (branch and branch ~= "") and branch or head, resume = "checkout" }
+end
+
+---@param root string
+---@param args string[]
+---@return boolean ok, string? err
+local function switch(root, args)
+  if M.dirty(root) > 0 then
+    return false, "uncommitted changes; commit or stash them first"
+  end
+  local cmd = { "git", "-C", root, "checkout", "--quiet" }
+  vim.list_extend(cmd, args)
+  local _, code = sh.sh(cmd)
+  if code ~= 0 then
+    return false, "git checkout " .. table.concat(args, " ") .. " failed"
+  end
+  return true
+end
+
+--- Check out `rev` detached, to review the branch as it stood there. Refuses
+--- over uncommitted changes, which would otherwise ride along into the review.
+---@param root string
+---@param rev string
+---@return boolean ok, string? err
+function M.checkout(root, rev)
+  return switch(root, { "--detach", rev })
+end
+
+--- Go back to the tip a range left.
+---@param root string
+---@param tip TriageTip
+---@return boolean ok, string? err
+function M.restore(root, tip)
+  return switch(root, { tip.rev })
 end
 
 --- Resolve a ref to its commit sha (cheap; used for cache keys).

@@ -14,6 +14,13 @@ local M = {}
 ---@field rev string short id the backend resolves, usable as a review base
 ---@field subject string
 ---@field pushed boolean a remote has it
+---@field patch_id string? what the commit changes, stable across a rebase; nil with no diff
+
+--- Where the work was before a review range checked out a commit below it,
+--- and how to get back there. Opaque outside the backend that made it.
+---@class TriageTip
+---@field rev string the top of the branch, for listing its commits
+---@field resume "checkout"|"edit"|"new" how the backend returns to it
 
 --- The backend for a directory, or nil if it is under neither VCS.
 ---@param dir string

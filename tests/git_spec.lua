@@ -335,6 +335,10 @@ describe("triage.vcs.git.commits", function()
     git("checkout", "-q", "topic")
 
     local got = commits("master")
+    for _, c in ipairs(got) do
+      assert.matches("^%x+$", c.patch_id)
+      c.patch_id = nil
+    end
     assert.same({
       { rev = git("rev-parse", "--short", "HEAD"), subject = "c3", pushed = false },
       { rev = git("rev-parse", "--short", pushed), subject = "c2", pushed = true },
@@ -343,5 +347,79 @@ describe("triage.vcs.git.commits", function()
 
   it("is empty when HEAD is the base", function()
     assert.same({}, commits("master"))
+  end)
+end)
+
+describe("triage.vcs.git commit ranges", function()
+  if not has_git then
+    pending("git not installed")
+    return
+  end
+  local backend = require("triage.vcs.git")
+  local root, git, commit
+
+  before_each(function()
+    root, git, commit = stack_repo()
+    git("checkout", "-q", "-b", "topic")
+  end)
+
+  after_each(function()
+    vim.fn.delete(root, "rf")
+  end)
+
+  it("keeps a commit's patch id across a rebase that leaves its diff alone", function()
+    local picked = commit()
+    git("checkout", "-q", "-b", "rebased", "master")
+    commit()
+    git("cherry-pick", picked)
+    local before = run(function()
+      return backend.commits(root, "master", "topic")
+    end)
+    local after = run(function()
+      return backend.commits(root, "master")
+    end)
+    assert.is_not.equals(before[1].rev, after[1].rev)
+    assert.equals(before[1].patch_id, after[1].patch_id)
+  end)
+
+  it("lists a tip other than HEAD", function()
+    commit()
+    local top = commit()
+    git("checkout", "-q", "--detach", "HEAD~1")
+    local got = run(function()
+      return backend.commits(root, "master", "topic")
+    end)
+    assert.equals(2, #got)
+    assert.equals(git("rev-parse", "--short", top), got[1].rev)
+  end)
+
+  it("checks out a commit detached and comes back to the branch", function()
+    local mid = commit()
+    commit()
+    local tip = run(function()
+      return backend.tip(root)
+    end)
+    assert.same({ rev = "topic", resume = "checkout" }, tip)
+    assert.is_true(run(function()
+      return backend.checkout(root, mid)
+    end))
+    assert.equals(mid, git("rev-parse", "HEAD"))
+    assert.equals("HEAD", git("rev-parse", "--abbrev-ref", "HEAD"))
+    assert.is_true(run(function()
+      return backend.restore(root, tip)
+    end))
+    assert.equals("topic", git("rev-parse", "--abbrev-ref", "HEAD"))
+  end)
+
+  it("refuses to check out over uncommitted changes", function()
+    local mid = commit()
+    commit()
+    vim.fn.writefile({ "wip" }, root .. "/f1.txt")
+    local ok, err = run(function()
+      return backend.checkout(root, mid)
+    end)
+    assert.is_false(ok)
+    assert.matches("uncommitted", err)
+    assert.equals("topic", git("rev-parse", "--abbrev-ref", "HEAD"))
   end)
 end)

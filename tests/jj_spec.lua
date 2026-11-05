@@ -334,9 +334,78 @@ describe("triage.vcs.jj.commits", function()
     local got = run(function()
       return backend.commits(root, "master")
     end)
+    -- D only describes the empty @, so it has no diff to name it by.
+    assert.is_nil(got[1].patch_id)
+    assert.matches("^%x+$", got[2].patch_id)
+    got[2].patch_id = nil
     assert.same({
       { rev = change("@"), subject = "D", pushed = false },
       { rev = change("@-"), subject = "C", pushed = true },
     }, got)
+  end)
+end)
+
+describe("triage.vcs.jj commit ranges", function()
+  if not has_jj then
+    pending("jj not installed")
+    return
+  end
+  local backend = require("triage.vcs.jj")
+  local root, jj
+
+  before_each(function()
+    root, jj = diverged_repo()
+  end)
+
+  after_each(function()
+    vim.fn.delete(root, "rf")
+  end)
+
+  local function change(rev)
+    return vim.trim(jj("log", "--no-graph", "-r", rev, "-T", "change_id.shortest(8)"))
+  end
+
+  it("keeps a change's patch id across a rebase that leaves its diff alone", function()
+    local function patch_id()
+      return run(function()
+        return backend.commits(root, "root()")
+      end)[1].patch_id
+    end
+    local before = patch_id()
+    jj("rebase", "-r", "@", "-d", "master")
+    assert.matches("^%x+$", before)
+    assert.equals(before, patch_id())
+  end)
+
+  it("edits a described @ again on the way back", function()
+    local was = change("@")
+    local tip = run(function()
+      return backend.tip(root)
+    end)
+    assert.same({ rev = was, resume = "edit" }, tip)
+    assert.is_true(run(function()
+      return backend.checkout(root, "master")
+    end))
+    assert.equals(change("master"), change("@-"))
+    assert.is_true(run(function()
+      return backend.restore(root, tip)
+    end))
+    assert.equals(was, change("@"))
+  end)
+
+  it("comes back to an empty @ as a new change on its parent", function()
+    jj("commit", "-m", "C")
+    local parent = change("@-")
+    local tip = run(function()
+      return backend.tip(root)
+    end)
+    assert.same({ rev = parent, resume = "new" }, tip)
+    assert.is_true(run(function()
+      return backend.checkout(root, "master")
+    end))
+    assert.is_true(run(function()
+      return backend.restore(root, tip)
+    end))
+    assert.equals(parent, change("@-"))
   end)
 end)
