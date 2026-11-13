@@ -111,3 +111,24 @@ describe("triage.folder", function()
     assert.equals("changed", triage.folder("/repo/docs/../src"))
   end)
 end)
+
+describe("triage.is_enabled", function()
+  local prev_cwd
+
+  before_each(function()
+    prev_cwd = vim.fn.getcwd()
+  end)
+
+  after_each(function()
+    vim.cmd.cd(prev_cwd)
+  end)
+
+  -- Removing a git worktree deletes the directory a tab is still cd'd into.
+  it("is false when the cwd has been deleted", function()
+    local gone = vim.fn.tempname()
+    vim.fn.mkdir(gone, "p")
+    vim.cmd.cd(gone)
+    vim.fn.delete(gone, "rf")
+    assert.is_false(triage.is_enabled())
+  end)
+end)

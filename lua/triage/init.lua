@@ -79,11 +79,19 @@ local function be(root)
   return vcs.for_root(root)
 end
 
+--- The cwd, or nil once its directory is gone (getcwd() then returns "").
+---@return string?
+local function cwd()
+  local dir = vim.fn.getcwd()
+  return dir ~= "" and dir or nil
+end
+
 --- Toplevel of the repo containing the cwd, or nil (async). Unlike cwd_root it
 --- sees through a symlinked cwd, because it asks the VCS rather than walking.
 ---@return string?
 local function repo_root()
-  local backend = vcs.for_dir(vim.fn.getcwd())
+  local dir = cwd()
+  local backend = dir and vcs.for_dir(dir)
   return backend and backend.repo_root() or nil
 end
 
@@ -109,7 +117,8 @@ end
 --- `git rev-parse` it won't see through a symlinked cwd.
 ---@return string?
 local function cwd_root()
-  return vcs.root(vim.fn.getcwd())
+  local dir = cwd()
+  return dir and vcs.root(dir)
 end
 
 --- Is review mode on for a repo (default: the cwd's)?
@@ -782,16 +791,15 @@ end
 --- base if review mode set one, else the fork point from the default branch — so
 --- the diff still shows branch-level changes when the sign-column review mode
 --- is off (mirrors the fallback in git.lua).
----@param root string? the buffer's repo root
+---@param root string the buffer's repo root
 ---@return string
 local function diff_base(root)
-  local base = root and require("triage.gitsigns").bases[root]
+  local base = require("triage.gitsigns").bases[root]
   if base then
     return base
   end
   -- Sync calls (this runs outside the coroutine paths the backends expect),
   -- anchored on the buffer's repo rather than nvim's cwd, which may be elsewhere.
-  root = root or vim.fn.getcwd()
   local override = M.target_override[root]
   -- Only where jjsigns is the gutter: a colocated repo draws with gitsigns,
   -- which needs a git ref, and a revset there resolves to nothing.
@@ -980,10 +988,14 @@ function M.setup(opts)
   vim.api.nvim_create_user_command("ReviewToggle", M.toggle, { desc = "Toggle branch review mode" })
   -- Complete :ReviewBase with local and remote branch names matching the prefix.
   local function complete_ref(arg)
+    local root = require("triage.gitsigns").buf_root(0) or cwd_root()
+    if not root then
+      return {}
+    end
     local refs = vim.fn.systemlist({
       "git",
       "-C",
-      vcs.root(vim.fn.expand("%:p:h")) or vim.fn.getcwd(),
+      root,
       "for-each-ref",
       "--format=%(refname:short)",
       "refs/heads",
