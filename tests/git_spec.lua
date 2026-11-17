@@ -423,3 +423,41 @@ describe("triage.vcs.git commit ranges", function()
     assert.equals("topic", git("rev-parse", "--abbrev-ref", "HEAD"))
   end)
 end)
+
+describe("triage.vcs.git.store", function()
+  if not has_git then
+    pending("git not installed")
+    return
+  end
+  local backend = require("triage.vcs.git")
+  local root, git
+
+  before_each(function()
+    root, git = stack_repo()
+  end)
+
+  after_each(function()
+    vim.fn.delete(root, "rf")
+  end)
+
+  it("hashes like hashes does and keeps the content readable by its hash", function()
+    vim.fn.writefile({ "decided" }, root .. "/new.txt")
+    local stored = run(function()
+      return backend.store(root, { "new.txt" })
+    end)
+    local hashed = run(function()
+      return backend.hashes(root, { "new.txt" })
+    end)
+    assert.equals(hashed["new.txt"], stored["new.txt"])
+    assert.equals("decided", git("cat-file", "-p", stored["new.txt"]))
+  end)
+
+  it("stores each file when one path can't be read", function()
+    vim.fn.writefile({ "decided" }, root .. "/new.txt")
+    local stored = run(function()
+      return backend.store(root, { "gone.txt", "new.txt" })
+    end)
+    assert.is_nil(stored["gone.txt"])
+    assert.equals("decided", git("cat-file", "-p", stored["new.txt"]))
+  end)
+end)

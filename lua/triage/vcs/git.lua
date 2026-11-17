@@ -343,6 +343,39 @@ function M.dirty(root)
   return #git(root, { "status", "--porcelain", "--untracked-files=normal" })
 end
 
+--- Blob hashes for working-tree files in ONE git process (rel -> hash), or one
+--- process per file after a failure; see M.hashes. `flags` go to every
+--- hash-object call.
+---@param root string
+---@param rels string[]
+---@param flags string[]
+---@return table<string, string>
+local function hash_objects(root, rels, flags)
+  local out = {}
+  if #rels == 0 then
+    return out
+  end
+  local cmd = { "git", "-C", root, "hash-object", "--stdin-paths" }
+  vim.list_extend(cmd, flags)
+  local lines, code = sh.sh(cmd, table.concat(rels, "\n") .. "\n")
+  if code == 0 and #lines == #rels then
+    for i, rel in ipairs(rels) do
+      out[rel] = lines[i]
+    end
+    return out
+  end
+  for _, rel in ipairs(rels) do
+    local args = { "hash-object" }
+    vim.list_extend(args, flags)
+    vim.list_extend(args, { "--", rel })
+    local hash = git(root, args)[1]
+    if hash and hash ~= "" then
+      out[rel] = hash
+    end
+  end
+  return out
+end
+
 --- Blob hashes for many working-tree files in ONE git process (rel -> hash),
 --- instead of a spawn per file -- refresh needs a hash for every decided file,
 --- which is O(review size) on every save otherwise. `--stdin-paths` prints one
@@ -353,25 +386,17 @@ end
 ---@param rels string[]
 ---@return table<string, string>
 function M.hashes(root, rels)
-  local out = {}
-  if #rels == 0 then
-    return out
-  end
-  local lines, code =
-    sh.sh({ "git", "-C", root, "hash-object", "--stdin-paths" }, table.concat(rels, "\n") .. "\n")
-  if code == 0 and #lines == #rels then
-    for i, rel in ipairs(rels) do
-      out[rel] = lines[i]
-    end
-    return out
-  end
-  for _, rel in ipairs(rels) do
-    local hash = M.hash(root, rel)
-    if hash then
-      out[rel] = hash
-    end
-  end
-  return out
+  return hash_objects(root, rels, {})
+end
+
+--- Blob hashes as M.hashes, with each file's content written to the object
+--- store, so a decision's hash names a blob git can read back -- what a "since
+--- my decision" diff compares against. Unreferenced, git prunes them in time.
+---@param root string
+---@param rels string[]
+---@return table<string, string>
+function M.store(root, rels)
+  return hash_objects(root, rels, { "-w" })
 end
 
 --- Current blob hash of a working-tree file, or nil.

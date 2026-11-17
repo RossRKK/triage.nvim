@@ -393,6 +393,10 @@ function M.hashes(root, rels)
   return out
 end
 
+--- As M.hashes: jj has no object store to keep the content in, so a decision
+--- made here can't be diffed against later.
+M.store = M.hashes
+
 --- Content hash of one working-tree file, or nil.
 ---@param root string
 ---@param rel string

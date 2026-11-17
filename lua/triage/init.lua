@@ -940,7 +940,8 @@ function M.mark(status, abs)
       for _, path in ipairs(targets) do
         rels[#rels + 1] = path:sub(#nroot + 2)
       end
-      local hashes = status and be(root).hashes(root, rels) or {}
+      -- Stored, not just hashed: "since decision" diffs against this content.
+      local hashes = status and be(root).store(root, rels) or {}
       for _, rel in ipairs(rels) do
         if status then
           if hashes[rel] then
