@@ -10,12 +10,18 @@
 -- Bases are per repo root and applied buffer-locally, never with gitsigns'
 -- global flag: review mode is a property of one repo, and a global base would
 -- be re-validated against every attached buffer — buffers from *another* repo
--- (another workspace tab) then error on a ref their repo can't resolve.
+-- (another workspace tab) then error on a ref their repo can't resolve. One
+-- buffer may carry its own base (set_buf_base), which those re-bases leave be.
 
 local M = {}
 
+local rebase
+
 ---@type table<string, string> normalized repo root -> commit-ish review base
 M.bases = {}
+
+---@type table<integer, string> buffer -> tree-ish it diffs against instead of its repo's base
+M.buf_bases = {}
 
 --- Normalized repo root containing a buffer's file, or nil (unnamed buffers
 --- deliberately resolve to nil rather than falling back to cwd — a scratch
@@ -30,12 +36,16 @@ function M.buf_root(buf)
   return require("triage.vcs").root(name)
 end
 
---- The review base a buffer should diff against, or nil for the default HEAD
---- base. For gitsigns' on_attach: buffers that attach after their repo's base
---- was chosen inherit it via this lookup.
+--- The base a buffer should diff against: its own if it has one, else its
+--- repo's review base, else nil for the default HEAD base. For gitsigns'
+--- on_attach: buffers that attach after a base was chosen inherit it via this.
 ---@param buf integer?
 ---@return string?
 function M.base_for(buf)
+  buf = (buf == nil or buf == 0) and vim.api.nvim_get_current_buf() or buf
+  if M.buf_bases[buf] then
+    return M.buf_bases[buf]
+  end
   local root = M.buf_root(buf)
   return root and M.bases[root] or nil
 end
@@ -130,12 +140,32 @@ function M.set_base(root, base)
   end
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_loaded(buf) and M.buf_root(buf) == root then
-      vim.api.nvim_buf_call(buf, function()
-        -- pcall: change_base errors on buffers gitsigns isn't attached to.
-        pcall(gs.change_base, base, false)
-      end)
+      rebase(gs, buf, M.buf_bases[buf] or base)
     end
   end
+end
+
+--- Give one buffer its own base, which its repo's later re-bases leave alone;
+--- nil puts it back on its repo's base. gitsigns only: a tree id is no revset.
+---@param buf integer
+---@param base string? tree-ish, or nil to follow the repo again
+function M.set_buf_base(buf, base)
+  M.buf_bases[buf] = base
+  local ok, gs = pcall(require, "gitsigns")
+  if ok then
+    rebase(gs, buf, M.base_for(buf))
+  end
+end
+
+--- Point one buffer's gutter at `base`.
+---@param gs table the gitsigns module
+---@param buf integer
+---@param base string?
+function rebase(gs, buf, base)
+  vim.api.nvim_buf_call(buf, function()
+    -- pcall: change_base errors on buffers gitsigns isn't attached to.
+    pcall(gs.change_base, base, false)
+  end)
 end
 
 return M

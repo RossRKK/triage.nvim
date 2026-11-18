@@ -1,7 +1,7 @@
 -- Runtime for the headless test suite: this plugin plus plenary (busted harness
 -- + luassert). plenary is reused from the Neovim config's lazy install so CI and
--- a local run share one copy. No neo-tree/gitsigns: the specs cover the pure
--- logic in triage/init.lua and fake whatever plugin objects it touches.
+-- a local run share one copy. No neo-tree/gitsigns: the specs fake whatever
+-- plugin objects they touch, except gitsigns_spec, which loads gitsigns itself.
 
 local root = vim.fn.fnamemodify(vim.fn.expand("<sfile>:p"), ":h:h")
 local plenary = vim.fn.stdpath("data") .. "/lazy/plenary.nvim"

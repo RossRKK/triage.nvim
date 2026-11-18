@@ -102,4 +102,70 @@ describe("triage decisions", function()
     refreshed_to("stale")
     assert.equals("stale", triage.folder(root .. "/dir/sub"))
   end)
+
+  describe("since-decision toggle", function()
+    local gsbase = require("triage.gitsigns")
+    -- buffer -> the base the fake gitsigns was last given (false for nil).
+    local given, saved_gitsigns, buf
+
+    before_each(function()
+      given = {}
+      saved_gitsigns = package.loaded.gitsigns
+      package.loaded.gitsigns = {
+        change_base = function(base)
+          given[vim.api.nvim_get_current_buf()] = base or false
+        end,
+      }
+      vim.cmd.edit(abs())
+      buf = vim.api.nvim_get_current_buf()
+    end)
+
+    after_each(function()
+      package.loaded.gitsigns = saved_gitsigns
+      gsbase.buf_bases = {}
+      vim.cmd("bwipeout! " .. buf)
+    end)
+
+    --- Toggle on and wait for the async tree build to land.
+    local function toggled_on()
+      triage.toggle_since_decision()
+      assert.is_true(vim.wait(5000, function()
+        return gsbase.buf_bases[buf] ~= nil
+      end))
+      return gsbase.buf_bases[buf]
+    end
+
+    it("bases the buffer on a tree holding the decided content", function()
+      marked("approved")
+      vim.fn.writefile({ "edited" }, abs())
+      local tree = toggled_on()
+      assert.equals(tree, given[buf])
+      assert.equals("decided", git("show", tree .. ":" .. rel))
+    end)
+
+    it("toggles back to the repo's review base", function()
+      marked("rejected")
+      local repo_base = gsbase.bases[root]
+      assert.is_not_nil(repo_base)
+      toggled_on()
+      triage.toggle_since_decision()
+      assert.is_nil(gsbase.buf_bases[buf])
+      assert.equals(repo_base, given[buf])
+    end)
+
+    it("keeps the buffer on its decision when the repo is re-based", function()
+      marked("approved")
+      local tree = toggled_on()
+      given[buf] = nil
+      gsbase.set_base(root, "HEAD")
+      assert.equals(tree, given[buf])
+      assert.equals(tree, gsbase.base_for(buf))
+    end)
+
+    it("leaves the base alone for a file with no decision", function()
+      triage.toggle_since_decision()
+      assert.is_nil(gsbase.buf_bases[buf])
+      assert.is_nil(given[buf])
+    end)
+  end)
 end)

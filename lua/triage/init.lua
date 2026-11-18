@@ -81,6 +81,8 @@ local uv = vim.uv or vim.loop
 
 local vcs = require("triage.vcs")
 
+local since_decision
+
 --- The VCS backend answering for a repo root (jj where `.jj` exists, else git).
 ---@param root string
 ---@return TriageBackend
@@ -1092,6 +1094,50 @@ function M.toggle_diff()
   end
 end
 
+--- Toggle the current buffer's diff between its review base and the content it
+--- had when you last approved or rejected it, to see what changed since. Only
+--- this buffer moves; the inline diff (M.toggle_diff) shows whichever is set.
+function M.toggle_since_decision()
+  local gsbase = require("triage.gitsigns")
+  local buf = vim.api.nvim_get_current_buf()
+  if gsbase.buf_bases[buf] then
+    gsbase.set_buf_base(buf, nil)
+    return vim.notify("review: diffing against the review base")
+  end
+  local root = gsbase.buf_root(buf)
+  if not root then
+    return vim.notify("review: not in a repo", vim.log.levels.WARN)
+  end
+  local rel = vim.fs.normalize(vim.api.nvim_buf_get_name(buf)):sub(#root + 2)
+  local decision = load_decisions(root)[rel]
+  if not decision then
+    return vim.notify("review: no decision on this file to diff against", vim.log.levels.INFO)
+  end
+  coroutine.wrap(function()
+    local ok, err = pcall(since_decision, buf, root, rel, decision)
+    if not ok then
+      vim.notify("review: since-decision diff failed: " .. tostring(err), vim.log.levels.ERROR)
+    end
+  end)()
+end
+
+--- Point `buf` at a tree holding the content `decision` recorded (async).
+---@param buf integer
+---@param root string normalized
+---@param rel string
+---@param decision Decision
+function since_decision(buf, root, rel, decision)
+  local tree = be(root).decision_tree(root, rel, decision.hash)
+  if not tree then
+    return vim.notify(
+      ("review: the content you %s isn't stored; mark it again to store it"):format(decision.status),
+      vim.log.levels.WARN
+    )
+  end
+  require("triage.gitsigns").set_buf_base(buf, tree)
+  vim.notify("review: diffing against the version you " .. decision.status)
+end
+
 --- Re-render the explorer so its review component picks up new status.
 function M.redraw_tree()
   require("triage.adapter").redraw()
@@ -1107,6 +1153,7 @@ local default_keys = {
   base = "<leader>rb", -- pick the range of the branch's commits to review
   approve_commits = "<leader>rA", -- mark the commits under review approved
   diff = "<leader>rd", -- toggle the inline diff view
+  since = "<leader>rD", -- toggle this file's diff to what changed since your decision
   refresh = "<leader>rR", -- recompute review status
 }
 
@@ -1224,6 +1271,11 @@ function M.setup(opts)
     M.toggle_diff,
     { desc = "Toggle inline diff vs review base" }
   )
+  vim.api.nvim_create_user_command(
+    "ReviewSinceDecision",
+    M.toggle_since_decision,
+    { desc = "Toggle this file's diff between the review base and your decision" }
+  )
   vim.api.nvim_create_user_command("ReviewMark", function()
     M.mark("approved")
   end, { desc = "Mark file/folder under cursor approved" })
@@ -1258,6 +1310,7 @@ function M.setup(opts)
     base = { M.pick_target, "Review: pick commit range" },
     approve_commits = { M.approve_commits, "Review: approve commits under review" },
     diff = { M.toggle_diff, "Review: toggle inline diff view" },
+    since = { M.toggle_since_decision, "Review: toggle diff since your decision" },
     refresh = { M.refresh, "Review: refresh status" },
   }
   local keys = vim.tbl_extend("force", default_keys, M.opts.keys or {})
