@@ -56,6 +56,20 @@ by `git patch-id`, as `git cherry` matches commits, so it survives a rebase that
 leaves a commit's diff alone and lapses once the diff changes. A commit with no
 diff can't be approved.
 
+`<leader>rr` approves a file (or every changed file under a folder) and
+`<leader>rj` rejects it; `<leader>ru` clears the decision. A decision records the
+file's content, so an edit afterwards shows: an approved file becomes stale
+(`✎`) and a rejected one revised (`↻`). Both keep the decision on record and stay
+in the queue until you decide again.
+
+`<leader>rD` (`:ReviewSinceDecision`) switches the current file's gutter from
+the review base to the content you last approved or rejected, so after asking
+an agent to change a file you see exactly what it changed. Press it again to go
+back. Only that buffer moves, and the inline diff (`<leader>rd`) draws whichever
+base it is on. git only: marking stores the content as a git blob, which git
+prunes once unreferenced for a couple of weeks, after which marking again is
+the way back. jj repos (colocated ones included) can't diff against a decision.
+
 The neo-tree glyph is registered as the `triage_status` component
 (`require("triage.adapter").status_component`); add it to your neo-tree
 filesystem renderers. See the source for the full command/keymap surface.
@@ -100,7 +114,9 @@ triage works on its own; `on_toggle` is optional if you're not pairing it.
 make test
 ```
 
-Headless plenary/busted; covers the verdict rollup and the path lookups.
+Headless plenary/busted, with plenary (and gitsigns, for `gitsigns_spec`) taken
+from the Neovim config's lazy install. git and jj specs run against throwaway
+repos.
 
 [neo-tree]: https://github.com/nvim-neo-tree/neo-tree.nvim
 [gitsigns]: https://github.com/lewis6991/gitsigns.nvim
