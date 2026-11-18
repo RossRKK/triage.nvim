@@ -403,14 +403,6 @@ function M.decision_tree()
   return nil
 end
 
---- Content hash of one working-tree file, or nil.
----@param root string
----@param rel string
----@return string?
-function M.hash(root, rel)
-  return sh.file_hash(root .. "/" .. rel)
-end
-
 --- Drop generated files from a review list.
 ---
 --- git reads `linguist-generated`/`generated` gitattributes for this; jj has no

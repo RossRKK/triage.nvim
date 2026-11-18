@@ -424,15 +424,6 @@ function M.decision_tree(root, rel, blob)
   end
 end
 
---- Current blob hash of a working-tree file, or nil.
----@param root string
----@param rel string
----@return string?
-function M.hash(root, rel)
-  local hash = git(root, { "hash-object", "--", rel })[1]
-  return (hash and hash ~= "") and hash or nil
-end
-
 --- Drop generated files from a review list.
 ---
 --- One `git check-attr` process for the whole list, not one per file. Its output
