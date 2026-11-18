@@ -399,6 +399,31 @@ function M.store(root, rels)
   return hash_objects(root, rels, { "-w" })
 end
 
+--- A tree holding only `blob` at `rel`, nested directories and all, so a diff
+--- that resolves `<tree>:<rel>` (gitsigns' base) can compare against a decision's
+--- stored content. One `mktree` per path component, innermost first; nil once
+--- the blob isn't in the object store (never stored, or pruned).
+---@param root string
+---@param rel string
+---@param blob string
+---@return string?
+function M.decision_tree(root, rel, blob)
+  local entry, path = "100644 blob " .. blob, rel
+  while true do
+    -- -z: a NUL-terminated entry, so a path can hold any byte but NUL.
+    local out, code =
+      sh.sh({ "git", "-C", root, "mktree", "-z" }, entry .. "\t" .. vim.fs.basename(path) .. "\0")
+    if code ~= 0 or not out[1] then
+      return nil
+    end
+    path = vim.fs.dirname(path)
+    if path == "." then
+      return out[1]
+    end
+    entry = "040000 tree " .. out[1]
+  end
+end
+
 --- Current blob hash of a working-tree file, or nil.
 ---@param root string
 ---@param rel string

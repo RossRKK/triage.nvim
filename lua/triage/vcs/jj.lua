@@ -397,6 +397,12 @@ end
 --- made here can't be diffed against later.
 M.store = M.hashes
 
+--- No tree to diff a decision against: this backend's hashes aren't git blobs.
+---@return nil
+function M.decision_tree()
+  return nil
+end
+
 --- Content hash of one working-tree file, or nil.
 ---@param root string
 ---@param rel string

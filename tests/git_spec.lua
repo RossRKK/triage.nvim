@@ -461,3 +461,52 @@ describe("triage.vcs.git.store", function()
     assert.equals("decided", git("cat-file", "-p", stored["new.txt"]))
   end)
 end)
+
+describe("triage.vcs.git.decision_tree", function()
+  if not has_git then
+    pending("git not installed")
+    return
+  end
+  local backend = require("triage.vcs.git")
+  local root, git
+
+  before_each(function()
+    root, git = stack_repo()
+  end)
+
+  after_each(function()
+    vim.fn.delete(root, "rf")
+  end)
+
+  ---@param rel string
+  ---@return string tree, string blob
+  local function decided(rel)
+    vim.fn.mkdir(vim.fs.dirname(root .. "/" .. rel), "p")
+    vim.fn.writefile({ "decided" }, root .. "/" .. rel)
+    local blob = run(function()
+      return backend.store(root, { rel })
+    end)[rel]
+    vim.fn.writefile({ "edited" }, root .. "/" .. rel)
+    return run(function()
+      return backend.decision_tree(root, rel, blob)
+    end), blob
+  end
+
+  it("resolves a nested path to the decided content", function()
+    local tree, blob = decided("a/b/c.txt")
+    assert.equals("decided", git("show", tree .. ":a/b/c.txt"))
+    assert.equals("100644 blob " .. blob .. "\ta/b/c.txt", git("ls-tree", "-r", tree))
+  end)
+
+  it("resolves a top-level path", function()
+    local tree = decided("top.txt")
+    assert.equals("decided", git("show", tree .. ":top.txt"))
+  end)
+
+  it("is nil for a blob the object store doesn't have", function()
+    local tree = run(function()
+      return backend.decision_tree(root, "a.txt", string.rep("1", 40))
+    end)
+    assert.is_nil(tree)
+  end)
+end)
