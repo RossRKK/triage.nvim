@@ -47,6 +47,10 @@ describe("triage.verdict", function()
     assert.equals("COMMENT", verdict_of({ a = "revised" }))
   end)
 
+  it("treats stale as pending", function()
+    assert.equals("COMMENT", verdict_of({ a = "approved", b = "stale" }))
+  end)
+
   it("ranks a rejection above revised", function()
     assert.equals("REQUEST_CHANGES", verdict_of({ a = "revised", b = "rejected" }))
   end)

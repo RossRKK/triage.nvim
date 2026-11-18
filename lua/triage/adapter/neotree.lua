@@ -4,7 +4,7 @@
 -- interface (see triage/adapter/init.lua, which selects the active one):
 --
 --   status_component(config, node, state) -> chunk   a neo-tree renderer
---     component that draws the ●/✓/✗/↻ triage glyph before a node's name.
+--     component that draws the ●/✓/✗/↻/✎ triage glyph before a node's name.
 --     Coloured glyph only; the name is left alone.
 --   cursor_path() -> string?   absolute path of the node under the cursor when
 --     the explorer is focused, else nil (so callers fall back to the buffer).

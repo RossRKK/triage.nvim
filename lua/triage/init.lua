@@ -14,9 +14,9 @@
 --
 -- Files can be triaged: marked "approved" (looked at, fine) or "rejected"
 -- (flagged to come back to). Either records the file's current blob hash. An
--- approved file that's edited again flips back to "changed" (re-review it fresh);
--- a rejected file that's edited becomes "revised" — the flag was acted on, so
--- re-review the fix — keeping the fact you'd flagged it rather than losing it.
+-- approved file that's edited again becomes "stale" and a rejected one "revised"
+-- — either way re-review it, keeping the decision on record so you can see what
+-- changed since you made it.
 --
 -- This module knows nothing about PR comments. A companion plugin (nitpick.nvim)
 -- draws GitHub review comments; wiring the two together — one toggle drives both,
@@ -36,9 +36,12 @@ M.icons = {
   approved = { text = "\xe2\x9c\x93", hl = "ReviewApproved" }, -- ✓
   rejected = { text = "\xe2\x9c\x97", hl = "ReviewRejected" }, -- ✗
   revised = { text = "\xe2\x86\xbb", hl = "ReviewRevised" }, -- ↻
+  stale = { text = "\xe2\x9c\x8e", hl = "ReviewStale" }, -- ✎
 }
 
--- Absolute path -> "changed"|"approved"|"rejected"|"revised", rebuilt on refresh.
+---@alias TriageStatus "changed"|"approved"|"rejected"|"revised"|"stale"
+
+-- Absolute path -> TriageStatus, rebuilt on refresh.
 M.status_by_path = {}
 
 -- Directory absolute path -> rolled-up status of its descendants (the highest-
@@ -188,6 +191,14 @@ M._review_branch = review_branch
 ---@field status ReviewStatus
 ---@field hash string blob hash recorded when the decision was made
 
+-- A decided file's status, by its decision and whether it still has the
+-- content decided on.
+---@type table<ReviewStatus, table<boolean, TriageStatus>>
+local decided_status = {
+  approved = { [true] = "approved", [false] = "stale" },
+  rejected = { [true] = "rejected", [false] = "revised" },
+}
+
 local function state_dir()
   local dir = vim.fn.stdpath("state") .. "/review"
   vim.fn.mkdir(dir, "p")
@@ -334,7 +345,7 @@ end
 --- one git call rather than a process per file.
 ---@param root string
 ---@param changed table<string, boolean> rel path -> true
----@return table<string, string> status abs path -> status
+---@return table<string, TriageStatus> status abs path -> status
 ---@return table<string, Decision> keep decisions still worth recording
 ---@return table<string, Decision> loaded the ledger as it was read
 local function decide(root, changed)
@@ -353,23 +364,11 @@ local function decide(root, changed)
   for rel in pairs(changed) do
     local abs = vim.fs.normalize(root .. "/" .. rel)
     local decision = decisions[rel]
-    if not decision then
-      status_by_path[abs] = "changed"
+    if decision then
+      status_by_path[abs] = decided_status[decision.status][decision.hash == hashes[rel]]
+      keep[rel] = decision
     else
-      local matches = decision.hash == hashes[rel]
-      if decision.status == "rejected" then
-        -- Keep the rejection on record either way: an edited-since rejected file
-        -- becomes "revised" (the flag was acted on — re-review the fix), not a
-        -- plain "changed" that would lose the fact you'd flagged it.
-        status_by_path[abs] = matches and "rejected" or "revised"
-        keep[rel] = decision
-      elseif matches then
-        status_by_path[abs] = "approved"
-        keep[rel] = decision
-      else
-        -- Approved file edited again: just needs a fresh look; drop the record.
-        status_by_path[abs] = "changed"
-      end
+      status_by_path[abs] = "changed"
     end
   end
   return status_by_path, keep, decisions
@@ -435,14 +434,14 @@ local function do_refresh(mygen)
 
   -- Roll each file's status up to its ancestor directories, taking the highest-
   -- priority descendant status, ordered by what needs the reviewer's attention:
-  --   revised > changed > rejected > approved
-  -- revised (a fix awaiting re-review) and changed (untriaged) are the reviewer's
-  -- queue, so a folder surfaces those first — collapsing it must not read as done
+  --   revised > stale > changed > rejected > approved
+  -- revised (a fix awaiting re-review), stale (an approval edited since) and
+  -- changed (untriaged) are the reviewer's queue, so a folder surfaces those first — collapsing it must not read as done
   -- while work remains inside. rejected is waiting on the author, not the
   -- reviewer, but still outranks approved so an open flag never hides under a
   -- folder that reads as done; a folder only goes approved once every changed
   -- descendant is approved.
-  local priority = { approved = 1, rejected = 2, changed = 3, revised = 4 }
+  local priority = { approved = 1, rejected = 2, changed = 3, stale = 4, revised = 5 }
   local folder_status = {}
   for abs, st in pairs(status_by_path) do
     local dir = vim.fs.dirname(abs)
@@ -677,9 +676,9 @@ function M.approve_commits()
   end)()
 end
 
---- Status for an absolute path: "changed"|"approved"|"rejected"|"revised"|nil.
+--- Status for an absolute path, or nil if it isn't under review.
 ---@param abs string?
----@return string?
+---@return TriageStatus?
 function M.status(abs)
   if not abs then
     return nil
@@ -701,7 +700,7 @@ end
 --- event, across every changed file. Not the tree's attention order: a
 --- rejection is a standing verdict however much is left to look at, so any live
 --- one makes it REQUEST_CHANGES, even mid-review. Otherwise, while any file is
---- still untriaged ("changed") or awaiting a re-review ("revised"), it's COMMENT
+--- still untriaged ("changed") or awaiting a re-review ("revised", "stale"), it's COMMENT
 --- -- a batch of notes with no standing verdict -- so an early, partial submit
 --- never renders a premature approval. APPROVE once everything is approved; nil
 --- when nothing's changed. Scoped to one repo (default: the cwd's), since the
@@ -711,7 +710,7 @@ end
 ---@return "APPROVE"|"REQUEST_CHANGES"|"COMMENT"|nil
 function M.verdict(root)
   root = root or cwd_root()
-  local priority = { approved = 1, changed = 2, revised = 3, rejected = 4 }
+  local priority = { approved = 1, changed = 2, stale = 3, revised = 4, rejected = 5 }
   local worst
   for path, st in pairs(M.status_by_path) do
     if (not root or under(path, root)) and (not worst or priority[st] > priority[worst]) then
@@ -725,7 +724,7 @@ function M.verdict(root)
   elseif worst == "rejected" then
     return "REQUEST_CHANGES"
   else
-    return "COMMENT" -- changed or revised: still mid-review
+    return "COMMENT" -- changed, stale or revised: still mid-review
   end
 end
 
@@ -1152,6 +1151,8 @@ function M.setup(opts)
     -- Revised = a rejection that's since been edited; blue reads as "action
     -- pending, re-review" and stays distinct from the red/green/yellow trio.
     vim.api.nvim_set_hl(0, "ReviewRevised", { link = "DiagnosticInfo", default = true })
+    -- Stale = an approval since edited; hint colour keeps it apart from the rest.
+    vim.api.nvim_set_hl(0, "ReviewStale", { link = "DiagnosticHint", default = true })
     -- Inline diff (M.toggle_diff) word-level highlight. gitsigns defaults these
     -- to TermCursor (a loud, wrong-hued cyan in most themes). Give each its own
     -- diff hue — the sign colour (green add / blue change / red delete) tinted
