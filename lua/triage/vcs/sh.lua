@@ -15,6 +15,20 @@ local M = {}
 ---@param cwd string? working directory for the process
 ---@return string[] lines, integer code
 function M.sh(cmd, stdin, cwd)
+  local out, code = M.run(cmd, stdin, cwd)
+  local lines = {}
+  for line in out:gmatch("[^\r\n]+") do
+    lines[#lines + 1] = line
+  end
+  return lines, code
+end
+
+--- M.sh, with stdout as it came: for `-z` output, whose paths may hold newlines.
+---@param cmd string[]
+---@param stdin string?
+---@param cwd string?
+---@return string stdout, integer code
+function M.run(cmd, stdin, cwd)
   local co = assert(coroutine.running(), "triage: vcs commands must run inside a coroutine")
   -- No optional locks: everything run here is a read-only query, but git status
   -- opportunistically refreshes the index, and that lock-file churn is visible
@@ -25,11 +39,7 @@ function M.sh(cmd, stdin, cwd)
     { text = true, stdin = stdin, cwd = cwd, env = { GIT_OPTIONAL_LOCKS = "0" } },
     function(obj)
       vim.schedule(function()
-        local lines = {}
-        for line in (obj.stdout or ""):gmatch("[^\r\n]+") do
-          lines[#lines + 1] = line
-        end
-        coroutine.resume(co, lines, obj.code)
+        coroutine.resume(co, obj.stdout or "", obj.code)
       end)
     end
   )
