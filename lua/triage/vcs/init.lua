@@ -16,6 +16,14 @@ local M = {}
 ---@field pushed boolean a remote has it
 ---@field patch_id string? what the commit changes, stable across a rebase; nil with no diff
 
+---@class TriageLines
+---@field additions integer
+---@field deletions integer
+
+--- One file the change is responsible for, as the change's diff saw it.
+---@class TriageChange
+---@field lines TriageLines? nil for a binary file, which has no lines to count
+
 --- Where the work was before a review range checked out a commit below it,
 --- and how to get back there. Opaque outside the backend that made it.
 ---@class TriageTip

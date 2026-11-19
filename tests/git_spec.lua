@@ -510,3 +510,104 @@ describe("triage.vcs.git.decision_tree", function()
     assert.is_nil(tree)
   end)
 end)
+
+describe("triage.vcs.git.changed", function()
+  if not has_git then
+    pending("git not installed")
+    return
+  end
+  local backend = require("triage.vcs.git")
+  local root, git
+
+  before_each(function()
+    root, git = diverged_repo()
+  end)
+
+  after_each(function()
+    vim.fn.delete(root, "rf")
+  end)
+
+  local function write_bytes(rel, data)
+    local f = assert(io.open(root .. "/" .. rel, "wb"))
+    f:write(data)
+    f:close()
+  end
+
+  local function changed()
+    return run(function()
+      return backend.changed(root, "master")
+    end)
+  end
+
+  it("counts the merge result's lines, not the base's own edits", function()
+    assert.same({ ["ours.txt"] = { lines = { additions = 1, deletions = 0 } } }, changed())
+  end)
+
+  it("has no lines for a binary file and names a rename by its new path", function()
+    vim.fn.writefile({ "1", "2", "3", "4", "5" }, root .. "/long.txt")
+    git("add", "-A")
+    git("commit", "-q", "-m", "long")
+    git("mv", "long.txt", "renamed file.txt")
+    write_bytes("blob.bin", "\0\1\2")
+    git("add", "-A")
+    git("commit", "-q", "-m", "D")
+    local files = changed()
+    assert.same({ lines = nil }, files["blob.bin"])
+    assert.same({ lines = { additions = 5, deletions = 0 } }, files["renamed file.txt"])
+    assert.is_nil(files["long.txt"])
+  end)
+
+  it("adds uncommitted edits to the committed lines, and counts untracked files whole", function()
+    vim.fn.writefile({ "ours", "two" }, root .. "/ours.txt")
+    vim.fn.writefile({ "x", "y", "z" }, root .. "/new.txt")
+    write_bytes("partial.txt", "no newline")
+    write_bytes("new.bin", "a\0b")
+    assert.same({
+      ["ours.txt"] = { lines = { additions = 2, deletions = 0 } },
+      ["new.txt"] = { lines = { additions = 3, deletions = 0 } },
+      ["partial.txt"] = { lines = { additions = 1, deletions = 0 } },
+      ["new.bin"] = { lines = nil },
+    }, changed())
+  end)
+
+  it("carries the counts into triage.report's files", function()
+    write_bytes("new.bin", "a\0b")
+    local report
+    require("triage").report({ root = root }, function(r)
+      report = r
+    end)
+    vim.wait(10000, function()
+      return report ~= nil
+    end)
+    assert.same({
+      {
+        path = vim.fs.normalize(root .. "/new.bin"),
+        rel = "new.bin",
+        status = "changed",
+      },
+      {
+        path = vim.fs.normalize(root .. "/ours.txt"),
+        rel = "ours.txt",
+        status = "changed",
+        lines = { additions = 1, deletions = 0 },
+      },
+    }, report.files)
+  end)
+end)
+
+describe("triage.vcs.git.parse_numstat", function()
+  local backend = require("triage.vcs.git")
+
+  it("reads counts, a binary file's dashes, and a rename's new path", function()
+    local out = "3\t1\ta b.txt\0-\t-\timg.png\0" .. "0\t0\t\0old\nname.txt\0new\nname.txt\0"
+    assert.same({
+      ["a b.txt"] = { lines = { additions = 3, deletions = 1 } },
+      ["img.png"] = { lines = nil },
+      ["new\nname.txt"] = { lines = { additions = 0, deletions = 0 } },
+    }, backend.parse_numstat(out))
+  end)
+
+  it("is empty for no output", function()
+    assert.same({}, backend.parse_numstat(""))
+  end)
+end)

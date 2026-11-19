@@ -286,16 +286,21 @@ end
 -- on. The merge tree -- and therefore the set of files the merge changes -- only
 -- moves when HEAD or the base branch moves, so on a focus/save where neither
 -- changed we skip `git merge-tree` (seconds on a big monorepo) entirely.
----@type { root: string, base: string, head: string, files: table<string, boolean> }?
+---@type { root: string, base: string, head: string, files: table<string, TriageChange> }?
 local merge_cache = nil
 
---- Files this branch is responsible for, relative to `base`.
+local numstat
+
+--- Files this branch is responsible for, relative to `base`, with the lines
+--- each one changes.
 ---
 --- The merge-result diff, so files the branch changed to content the base
 --- already has don't appear -- then the cheap working-tree additions on top.
+--- A file both committed and edited since counts the lines of both diffs, so
+--- an edit to lines the branch already changed counts them twice.
 ---@param root string
 ---@param base string
----@return table<string, true>?
+---@return table<string, TriageChange>?
 function M.changed(root, base)
   local base_sha, head_sha = M.rev(root, base), M.rev(root, "HEAD")
   if not base_sha or not head_sha then
@@ -314,26 +319,89 @@ function M.changed(root, base)
     if not tree then
       return nil
     end
-    committed = {}
-    for _, rel in ipairs(git(root, { "diff", "--name-only", "--diff-filter=d", base, tree })) do
-      committed[rel] = true
-    end
+    committed = numstat(root, { base, tree })
     merge_cache = { root = root, base = base_sha, head = head_sha, files = committed }
   end
 
-  local changed = {}
-  for rel in pairs(committed) do
-    changed[rel] = true
-  end
+  local changed = vim.deepcopy(committed)
   -- The cheap git calls, and they change on save, so they're recomputed every
   -- time rather than cached.
-  for _, rel in ipairs(git(root, { "diff", "--name-only", "--diff-filter=d", "HEAD" })) do
-    changed[rel] = true
+  for rel, change in pairs(numstat(root, { "HEAD" })) do
+    changed[rel] = changed[rel] and M.sum(changed[rel], change) or change
   end
-  for _, rel in ipairs(git(root, { "ls-files", "--others", "--exclude-standard" })) do
-    changed[rel] = true
+  local untracked =
+    sh.run({ "git", "-C", root, "ls-files", "-z", "--others", "--exclude-standard" })
+  for _, rel in ipairs(vim.split(untracked, "\0", { plain = true, trimempty = true })) do
+    changed[rel] = M.file_change(root .. "/" .. rel)
   end
   return changed
+end
+
+--- `git diff --numstat` over `revs`, deletions dropped: rel -> its change.
+---@param root string
+---@param revs string[]
+---@return table<string, TriageChange>
+function numstat(root, revs)
+  local cmd = { "git", "-C", root, "diff", "--numstat", "-z", "--diff-filter=d" }
+  vim.list_extend(cmd, revs)
+  return M.parse_numstat((sh.run(cmd)))
+end
+
+--- Parse `git diff --numstat -z`: "<adds>\t<dels>\t<path>\0", or for a rename
+--- or copy "<adds>\t<dels>\t\0<old>\0<new>\0". Binary files count "-".
+---@param out string
+---@return table<string, TriageChange>
+function M.parse_numstat(out)
+  local fields = vim.split(out, "\0", { plain = true })
+  local changes, i = {}, 1
+  while i <= #fields do
+    local adds, dels, path = fields[i]:match("^([%d-]+)\t([%d-]+)\t(.*)$")
+    if not adds then
+      break
+    end
+    i = i + 1
+    if path == "" then
+      path, i = fields[i + 1], i + 2
+    end
+    local lines = adds ~= "-" and { additions = tonumber(adds), deletions = tonumber(dels) } or nil
+    changes[path] = { lines = lines }
+  end
+  return changes
+end
+
+--- Two diffs' changes to one file, added together.
+---@param a TriageChange
+---@param b TriageChange
+---@return TriageChange
+function M.sum(a, b)
+  if not a.lines or not b.lines then
+    return { lines = nil }
+  end
+  return {
+    lines = {
+      additions = a.lines.additions + b.lines.additions,
+      deletions = a.lines.deletions + b.lines.deletions,
+    },
+  }
+end
+
+--- An untracked file as a diff from nothing would show it: every line added,
+--- or binary when its first 8000 bytes hold a NUL -- git's own test, which an
+--- unreadable file also lands on, having no lines to count.
+---@param path string absolute
+---@return TriageChange
+function M.file_change(path)
+  local f = io.open(path, "rb")
+  local data = f and f:read("*a")
+  if f then
+    f:close()
+  end
+  if not data or data:sub(1, 8000):find("\0", 1, true) then
+    return { lines = nil }
+  end
+  local _, newlines = data:gsub("\n", "")
+  local unterminated = (#data > 0 and data:sub(-1) ~= "\n") and 1 or 0
+  return { lines = { additions = newlines + unterminated, deletions = 0 } }
 end
 
 --- How many paths the working tree changes (the "uncommitted" count).

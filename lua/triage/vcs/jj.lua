@@ -320,7 +320,8 @@ function M.rev(root, ref)
   return field(root, "commit_id", "present(" .. ref .. ")")
 end
 
---- Files this change is responsible for, relative to `base`.
+--- Files this change is responsible for, relative to `base`, with the lines
+--- each one changes.
 ---
 --- Diffed from the fork point, not from `base` itself. A change can sit behind
 --- its base -- a branch never rebased onto a trunk that moved on -- and a plain
@@ -329,39 +330,62 @@ end
 --- this is the `base...HEAD` the git backend uses. Still one command, and no
 --- merged tree: a change that IS on top of its base has the base as its fork
 --- point, and the two diffs are the same.
+---
+--- A git-format diff, the one output that names each file plainly and says
+--- what changed in it: `--summary` has no counts, and `--stat` abbreviates
+--- renames and long paths.
 ---@param root string
 ---@param base string revset
----@return table<string, true>?
+---@return table<string, TriageChange>?
 function M.changed(root, base)
   local from = "fork_point(" .. base .. " | @)"
-  local lines, code = jj(root, { "diff", "--from", from, "--to", "@", "--summary" })
+  local lines, code = jj(root, { "diff", "--from", from, "--to", "@", "--git" })
   if code ~= 0 then
     return nil
   end
-  local files = {}
-  for _, line in ipairs(lines) do
-    -- "<letter> <path>"; D(eleted) files have nothing to open or review.
-    local status, rel = line:match("^(%a) (.+)$")
-    if rel and status ~= "D" then
-      files[M.summary_path(rel)] = true
-    end
-  end
-  return files
+  return M.parse_git_diff(lines)
 end
 
---- The on-disk path of a `jj diff --summary` entry.
----
---- Renames and copies are printed with the differing part in braces, sharing
---- the prefix and suffix: "a/{x => y/src}/s.toml", or "{q.txt => zz.txt}"
---- when nothing is shared. Only the new side exists in the working copy, so
---- that is the path to review; taken literally, the braced form named a file
---- that could never be hashed or marked, and its folder stayed "changed".
----@param rel string
----@return string
-function M.summary_path(rel)
-  local path = rel:gsub("{[^{}]-=> ?([^{}]*)}", "%1")
-  -- "a/{x => }/s.toml" leaves "a//s.toml" once the old side goes.
-  return (path:gsub("//+", "/"))
+--- Parse a git-format diff into rel -> change, deleted files dropped (they have
+--- nothing to open or review). A file is named by its `rename to`/`copy to`
+--- line when it has one, else by its header, whose two halves are then equal
+--- -- which is how a path with spaces in it is split out.
+---@param lines string[]
+---@return table<string, TriageChange>
+function M.parse_git_diff(lines)
+  local changes = {}
+  local path, change, deleted, in_hunk
+  local function finish()
+    if path and not deleted then
+      changes[path] = change
+    end
+  end
+  for _, line in ipairs(lines) do
+    local header = line:match("^diff %-%-git (.*)$")
+    if header then
+      finish()
+      local n = (#header - 5) / 2
+      local left, right = header:sub(3, 2 + n), header:sub(n + 6)
+      path = (left == right) and left or nil
+      change, deleted, in_hunk = { lines = { additions = 0, deletions = 0 } }, false, false
+    elseif in_hunk then
+      local mark = line:sub(1, 1)
+      if mark == "+" then
+        change.lines.additions = change.lines.additions + 1
+      elseif mark == "-" then
+        change.lines.deletions = change.lines.deletions + 1
+      end
+    elseif change then
+      path = line:match("^rename to (.*)$") or line:match("^copy to (.*)$") or path
+      deleted = deleted or line:match("^deleted file mode") ~= nil
+      if line:match("^Binary files ") then
+        change.lines = nil
+      end
+      in_hunk = line:match("^@@ ") ~= nil
+    end
+  end
+  finish()
+  return changes
 end
 
 --- How many files the working copy changes (the "uncommitted" count).

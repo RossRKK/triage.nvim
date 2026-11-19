@@ -109,7 +109,7 @@ end
 --- The files a change is responsible for, generated files dropped.
 ---@param root string
 ---@param base string
----@return table<string, true>?
+---@return table<string, TriageChange>?
 local function changed_files(root, base)
   local backend = be(root)
   local changed = backend.changed(root, base)
@@ -118,7 +118,7 @@ local function changed_files(root, base)
   end
   local kept = {}
   for _, rel in ipairs(backend.filter_generated(root, vim.tbl_keys(changed))) do
-    kept[rel] = true
+    kept[rel] = changed[rel]
   end
   return kept
 end
@@ -346,7 +346,7 @@ end
 --- to this; a read-only caller ignores it). Async — hashes every decided file in
 --- one git call rather than a process per file.
 ---@param root string
----@param changed table<string, boolean> rel path -> true
+---@param changed table<string, TriageChange>
 ---@return table<string, TriageStatus> status abs path -> status
 ---@return table<string, Decision> keep decisions still worth recording
 ---@return table<string, Decision> loaded the ledger as it was read
@@ -765,8 +765,9 @@ end
 ---@field ahead integer? commits on HEAD not pushed to upstream
 ---@field behind integer? commits on upstream not in HEAD
 ---@field dirty integer files with uncommitted changes
----@field files { path: string, rel: string, status: string }[] under review,
----   sorted by path; status is the same set M.status returns
+---@field files { path: string, rel: string, status: string, lines: TriageLines? }[]
+---   under review, sorted by path; status is the same set M.status returns, and
+---   lines what the review's diff changes in the file (nil for a binary file)
 ---@field counts table<string, integer> status -> number of files
 
 --- Everything a branch overview needs, in one async pass: where the branch sits
@@ -834,10 +835,10 @@ function M.report(opts, cb)
       local changed = base and changed_files(root, base)
       if changed then
         local status_by_path = decide(root, changed)
-        for rel in pairs(changed) do
+        for rel, change in pairs(changed) do
           local abs = vim.fs.normalize(root .. "/" .. rel)
           local status = status_by_path[abs] or "changed"
-          files[#files + 1] = { path = abs, rel = rel, status = status }
+          files[#files + 1] = { path = abs, rel = rel, status = status, lines = change.lines }
           counts[status] = (counts[status] or 0) + 1
         end
         table.sort(files, function(a, b)

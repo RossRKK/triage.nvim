@@ -83,11 +83,10 @@ describe("triage.vcs.jj.changed", function()
     local files = run(function()
       return backend.changed(root, base)
     end)
-    assert.same({ ["ours.txt"] = true }, files)
+    assert.same({ ["ours.txt"] = { lines = { additions = 1, deletions = 0 } } }, files)
   end)
 
   it("lists a renamed file under its new path, not jj's {old => new} form", function()
-    -- Rename inside the change, so the summary prints "a/{x => y/src}/s.toml".
     vim.fn.mkdir(root .. "/a/y/src", "p")
     assert.equals(0, vim.fn.rename(root .. "/a/x/s.toml", root .. "/a/y/src/s.toml"))
     -- The backend never snapshots (--ignore-working-copy), so snapshot here.
@@ -95,27 +94,79 @@ describe("triage.vcs.jj.changed", function()
     local files = run(function()
       return backend.changed(root, "trunk()")
     end)
-    assert.same({ ["ours.txt"] = true, ["a/y/src/s.toml"] = true }, files)
+    assert.same({ "a/y/src/s.toml", "ours.txt" }, vim.fn.sort(vim.tbl_keys(files)))
+    assert.same({ additions = 0, deletions = 0 }, files["a/y/src/s.toml"].lines)
+  end)
+
+  it("counts each file's lines from the fork point, and none for a binary file", function()
+    vim.fn.writefile({ "ours", "more", "lines" }, root .. "/ours.txt")
+    local f = assert(io.open(root .. "/blob.bin", "wb"))
+    f:write("\0\1\2")
+    f:close()
+    jj_cmd("describe", "-m", "edits")
+    local files = run(function()
+      return backend.changed(root, "trunk()")
+    end)
+    assert.same({
+      ["ours.txt"] = { lines = { additions = 3, deletions = 0 } },
+      ["blob.bin"] = { lines = nil },
+    }, files)
   end)
 end)
 
-describe("triage.vcs.jj.summary_path", function()
+describe("triage.vcs.jj.parse_git_diff", function()
   local backend = require("triage.vcs.jj")
 
-  it("leaves a plain path alone", function()
-    assert.equals("a/b.txt", backend.summary_path("a/b.txt"))
+  it("counts each file's added and removed lines, hunk headers and file headers aside", function()
+    assert.same(
+      {
+        ["keep.txt"] = { lines = { additions = 2, deletions = 1 } },
+        ["sp ace.txt"] = { lines = { additions = 2, deletions = 0 } },
+      },
+      backend.parse_git_diff({
+        "diff --git a/keep.txt b/keep.txt",
+        "index de980441c3..a7bc997ebe 100644",
+        "--- a/keep.txt",
+        "+++ b/keep.txt",
+        "@@ -1,3 +1,4 @@",
+        " a",
+        "-b",
+        "+B",
+        " c",
+        "@@ -9,1 +10,2 @@",
+        "+d",
+        "diff --git a/sp ace.txt b/sp ace.txt",
+        "new file mode 100644",
+        "--- /dev/null",
+        "+++ b/sp ace.txt",
+        "@@ -0,0 +1,2 @@",
+        "+--- not a header",
+        "+l2",
+      })
+    )
   end)
 
-  it("keeps the new side of a rename with a shared prefix and suffix", function()
-    assert.equals("a/y/src/s.toml", backend.summary_path("a/{x => y/src}/s.toml"))
-  end)
-
-  it("keeps the new side of a rename with nothing shared", function()
-    assert.equals("zz.txt", backend.summary_path("{q.txt => zz.txt}"))
-  end)
-
-  it("collapses the slash left when a directory level is removed", function()
-    assert.equals("a/s.toml", backend.summary_path("a/{x => }/s.toml"))
+  it("names a rename by its new path, drops a deletion, binary has no lines", function()
+    assert.same(
+      {
+        ["d/new name.txt"] = { lines = { additions = 0, deletions = 0 } },
+        ["img.bin"] = { lines = nil },
+      },
+      backend.parse_git_diff({
+        "diff --git a/d/old.txt b/d/new name.txt",
+        "rename from d/old.txt",
+        "rename to d/new name.txt",
+        "diff --git a/gone.txt b/gone.txt",
+        "deleted file mode 100644",
+        "--- a/gone.txt",
+        "+++ /dev/null",
+        "@@ -1,1 +0,0 @@",
+        "-x",
+        "diff --git a/img.bin b/img.bin",
+        "new file mode 100644",
+        "Binary files /dev/null and b/img.bin differ",
+      })
+    )
   end)
 end)
 
