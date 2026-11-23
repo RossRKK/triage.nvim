@@ -1,10 +1,11 @@
 -- The since-decision toggle against the real gitsigns: it must accept a
 -- decision tree as a buffer's base and draw the hunks since the decision.
--- Uses the Neovim config's lazy install of gitsigns, as minimal_init does plenary.
+-- Uses the flake's gitsigns (GITSIGNS_DIR), else the Neovim config's lazy
+-- install, as minimal_init does plenary.
 
 local assert = require("luassert")
 
-local gitsigns_dir = vim.fn.stdpath("data") .. "/lazy/gitsigns.nvim"
+local gitsigns_dir = vim.env.GITSIGNS_DIR or (vim.fn.stdpath("data") .. "/lazy/gitsigns.nvim")
 
 describe("since-decision toggle under gitsigns", function()
   if vim.fn.executable("git") == 0 or vim.fn.isdirectory(gitsigns_dir) == 0 then

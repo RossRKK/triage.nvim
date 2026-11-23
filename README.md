@@ -111,12 +111,11 @@ triage works on its own; `on_toggle` is optional if you're not pairing it.
 ## Tests
 
 ```bash
-make test
+nix develop -c make test   # or: nix flake check
 ```
 
-Headless plenary/busted, with plenary (and gitsigns, for `gitsigns_spec`) taken
-from the Neovim config's lazy install. git and jj specs run against throwaway
-repos.
+Headless plenary/busted, with nvim, plenary, gitsigns (for `gitsigns_spec`),
+git and jj from the flake. git and jj specs run against throwaway repos.
 
 [neo-tree]: https://github.com/nvim-neo-tree/neo-tree.nvim
 [gitsigns]: https://github.com/lewis6991/gitsigns.nvim
