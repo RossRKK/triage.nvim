@@ -730,6 +730,35 @@ function M.verdict(root)
   end
 end
 
+---@class TriageReview
+---@field root string normalized repo root
+---@field base string the branch under review
+---@field label string? why that base was picked (see M.base_labels)
+---@field files { rel: string, status: TriageStatus }[] sorted by rel
+
+--- The active review of the repo containing `dir`, as plain data, or nil while
+--- review mode is off there or its first refresh hasn't settled. Sync: it reads
+--- the state the last refresh left, so it can answer a --remote-expr.
+---@param dir string
+---@return TriageReview?
+function M.review(dir)
+  local root = vcs.root(dir)
+  local base = root and M.reviews[root]
+  if not base then
+    return nil
+  end
+  local files = {}
+  for path, status in pairs(M.status_by_path) do
+    if under(path, root) and path ~= root then
+      files[#files + 1] = { rel = path:sub(#root + 2), status = status }
+    end
+  end
+  table.sort(files, function(a, b)
+    return a.rel < b.rel
+  end)
+  return { root = root, base = base, label = M.base_labels[root], files = files }
+end
+
 --- The review-mode status string for the statusline: the base being reviewed
 --- against. Empty while review mode is off, so the statusline component collapses
 --- to nothing. (The comment plugin contributes its own fragment separately; see

@@ -63,6 +63,48 @@ describe("triage.verdict", function()
   end)
 end)
 
+describe("triage.review", function()
+  local root
+
+  before_each(function()
+    root = vim.fs.normalize(vim.fn.tempname())
+    vim.fn.mkdir(root .. "/.git", "p")
+    vim.fn.mkdir(root .. "/src", "p")
+  end)
+
+  after_each(function()
+    triage.status_by_path = {}
+    triage.reviews = {}
+    triage.base_labels = {}
+    vim.fn.delete(root, "rf")
+  end)
+
+  it("is nil while the repo has no active review", function()
+    triage.status_by_path = { [root .. "/a.lua"] = "changed" }
+    assert.is_nil(triage.review(root))
+  end)
+
+  it("is nil outside a repo", function()
+    assert.is_nil(triage.review("/"))
+  end)
+
+  it("lists the repo's files by relative path, from any directory in it", function()
+    triage.reviews[root] = "main"
+    triage.base_labels[root] = "#412"
+    triage.status_by_path = {
+      [root .. "/src/b.lua"] = "rejected",
+      [root .. "/a.lua"] = "approved",
+      ["/elsewhere/c.lua"] = "changed",
+    }
+    assert.same({
+      root = root,
+      base = "main",
+      label = "#412",
+      files = { { rel = "a.lua", status = "approved" }, { rel = "src/b.lua", status = "rejected" } },
+    }, triage.review(root .. "/src"))
+  end)
+end)
+
 describe("triage.status", function()
   before_each(function()
     triage.status_by_path = { ["/repo/a.lua"] = "approved" }
